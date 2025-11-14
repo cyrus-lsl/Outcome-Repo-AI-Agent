@@ -24,19 +24,6 @@ def main():
     except Exception:
         # non-fatal: continue without failing the app
         pass
-
-    # Lightweight non-sensitive diagnostics to help debug "Oh no. Error running app"
-    try:
-        env_diag = {
-            "cwd": os.getcwd(),
-            "env_path_found": bool(env_path) if 'env_path' in locals() else False,
-            "hf_token_present": bool(os.environ.get('HF_TOKEN')),
-        }
-        with st.expander("⚠️ Runtime diagnostics (no secrets shown)"):
-            st.write(env_diag)
-    except Exception:
-        # keep diagnostics best-effort and non-fatal
-        pass
     
     
     # Define the Excel file path

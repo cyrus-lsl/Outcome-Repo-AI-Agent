@@ -24,6 +24,16 @@ def main():
     except Exception:
         # non-fatal: continue without failing the app
         pass
+    try:
+        env_path = find_dotenv(usecwd=True)
+        if env_path:
+            load_dotenv(env_path, override=False)
+        else:
+            # fallback to default search (cwd, parent, etc.)
+            load_dotenv(override=False)
+    except Exception:
+        # non-fatal: continue without failing the app
+        pass
     
     
     # Define the Excel file path

@@ -56,7 +56,7 @@ def build_dataset_context(df):
     return "\n".join(context_parts)
 
 
-def call_huggingface_chat(prompt, df):
+def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max_results=6):
     """Call Hugging Face chat model for responses.
 
     The function sends a strict prompt that lists instruments with short
@@ -81,6 +81,9 @@ def call_huggingface_chat(prompt, df):
             want_validated_hk = True
     except Exception:
         want_validated_hk = False
+    # Honor explicit UI toggle override
+    if validated_only:
+        want_validated_hk = True
 
     # Helper to interpret free-text 'Validated in Hong Kong' values conservatively
     def _validated_in_hk_text(x):
@@ -108,6 +111,12 @@ def call_huggingface_chat(prompt, df):
             df_for_model = df[df['Validated in Hong Kong'].apply(_validated_in_hk_text)]
         except Exception:
             df_for_model = df
+    # Optionally filter to programme-level metrics if requested by UI
+    if prog_only and 'Programme-level metric?' in df_for_model.columns:
+        try:
+            df_for_model = df_for_model[df_for_model['Programme-level metric?'].astype(str).str.strip().str.lower().isin(['yes','y','true'])]
+        except Exception:
+            pass
 
     # Build instrument lines and name list
     inst_lines = []
@@ -125,13 +134,15 @@ def call_huggingface_chat(prompt, df):
     system_message = (
         "You are an assistant that selects only instrument NAMES from the provided DATABASE. "
         "You will be given a list of instruments with short metadata (Domain, Target groups, Programme-level flag). Do NOT invent any names. "
-        "Return ONLY a valid JSON array (e.g. [\"Name A\", \"Name B\"]) containing up to 6 names that appear in the provided list."
+        f"Return ONLY a valid JSON array (e.g. [\"Name A\", \"Name B\"]) containing up to {max_results} names that appear in the provided list."
     )
 
     user_message = (
         f"DATABASE OF MEASUREMENT INSTRUMENTS:\nEach line: Name | Domain | Target(s) | Programme-level\n{chr(10).join(inst_lines)}\n\n"
         f"USER QUERY: {prompt}\n\n"
-        + "Choose up to 6 instruments from the provided list that best match the user query, considering Domain, Purpose and Target groups. Return a JSON array with instrument names only."
+        + ("NOTE: The user requested only instruments validated in Hong Kong.\n" if want_validated_hk else "")
+        + ("NOTE: The user requested only programme-level instruments.\n" if prog_only else "")
+        + f"Choose up to {max_results} instruments from the provided list that best match the user query, considering Domain, Purpose and Target groups. Return a JSON array with instrument names only."
     )
 
     try:
@@ -291,6 +302,13 @@ def render_chat_page(agent, df):
             else:
                 st.markdown(message.get('content', ''))
 
+    # Chat-level UI toggles for stricter filters
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        chat_validated_only = st.checkbox("Require HK-validated only", value=False)
+    with col2:
+        chat_prog_only = st.checkbox("Programme-level only", value=False)
+
     if prompt := st.chat_input("Ask about measurement instruments..."):
         # Render the user's message immediately so it's visible in the chat UI
         with st.chat_message("user"):
@@ -298,7 +316,7 @@ def render_chat_page(agent, df):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("assistant"):
             with st.spinner("🤔 Thinking..."):
-                response = call_huggingface_chat(prompt, df)
+                response = call_huggingface_chat(prompt, df, validated_only=chat_validated_only, prog_only=chat_prog_only, max_results=8)
 
                 # Build assistant message object
                 if isinstance(response, dict) and 'matched' in response:

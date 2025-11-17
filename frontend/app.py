@@ -26,11 +26,6 @@ def initialize_agent():
     excel_path = "measurement_instruments.xlsx"
     sheet_name = "Measurement Instruments"
     
-    if not os.path.exists(excel_path):
-        st.error("❌ measurement_instruments.xlsx not found")
-        st.info("Please make sure the Excel file is in the same folder as this app")
-        return None
-    
     from backend.agent_core import MeasurementInstrumentAgent
     return MeasurementInstrumentAgent(excel_path, sheet_name=sheet_name)
 

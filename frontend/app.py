@@ -302,12 +302,10 @@ def render_chat_page(agent, df):
             else:
                 st.markdown(message.get('content', ''))
 
-    # Chat-level UI toggles for stricter filters
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        chat_validated_only = st.checkbox("Require HK-validated only", value=False)
-    with col2:
-        chat_prog_only = st.checkbox("Programme-level only", value=False)
+    # Chat-level UI toggles for stricter filters (kept in the sidebar so they
+    # remain visible and in a fixed position across reruns)
+    chat_validated_only = st.sidebar.checkbox("Require HK-validated only", value=False)
+    chat_prog_only = st.sidebar.checkbox("Programme-level only", value=False)
 
     if prompt := st.chat_input("Ask about measurement instruments..."):
         # Render the user's message immediately so it's visible in the chat UI

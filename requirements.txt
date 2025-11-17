@@ -1,0 +1,5 @@
+streamlit>=1.18
+pandas
+python-dotenv
+openai
+openpyxl

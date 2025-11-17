@@ -53,14 +53,33 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 suggested_names = []
 
         if suggested_names:
-            for name in suggested_names[:max_results]:
-                match = self.df[
-                    self.df['Measurement Instrument'].str.contains(name, case=False, na=False)
-                ]
-                if not match.empty:
-                    row = match.iloc[0]
-                    results.append({'instrument': row, 'similarity_score': None})
-            return results
+                # Attempt to map each returned name to a dataframe row. Try:
+                # 1) case-insensitive substring match
+                # 2) fallback to close string matching against the full instrument list
+                import difflib
+                instrument_names_full = self.df['Measurement Instrument'].astype(str).tolist()
+                for name in suggested_names[:max_results]:
+                    # direct substring match first
+                    match = self.df[self.df['Measurement Instrument'].str.contains(name, case=False, na=False)]
+                    if not match.empty:
+                        row = match.iloc[0]
+                        results.append({'instrument': row, 'similarity_score': None})
+                        continue
+
+                    # fuzzy match against instrument names
+                    best = difflib.get_close_matches(name, instrument_names_full, n=1, cutoff=0.6)
+                    if best:
+                        best_name = best[0]
+                        match = self.df[self.df['Measurement Instrument'].str.fullmatch(best_name, case=False, na=False)]
+                        if match.empty:
+                            # try substring if fullmatch failed
+                            match = self.df[self.df['Measurement Instrument'].str.contains(best_name, case=False, na=False)]
+                        if not match.empty:
+                            row = match.iloc[0]
+                            results.append({'instrument': row, 'similarity_score': None})
+                # If we found matches via LLM, return them
+                if results:
+                    return results
 
         qtokens = [t.strip().lower() for t in str(query).split() if t.strip()]
         if not qtokens:

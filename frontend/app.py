@@ -380,7 +380,12 @@ def render_chat_page(agent, df):
 
     if st.button("Clear Chat History"):
         st.session_state.messages = []
-        st.experimental_rerun()
+        try:
+            # Some Streamlit deployments may not expose experimental_rerun;
+            # fail-safe to avoid crashing the app.
+            st.experimental_rerun()
+        except Exception:
+            pass
 
 
 def render_manual_search_page(agent, df):

@@ -30,27 +30,9 @@ def initialize_agent():
         st.error("❌ measurement_instruments.xlsx not found")
         st.info("Please make sure the Excel file is in the same folder as this app")
         return None
-    try:
-        from backend.agent_core import MeasurementInstrumentAgent
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        st.error("❌ Failed to import the backend agent module.")
-        st.markdown(
-            "The app could not load the backend code. This often means a missing dependency or a syntax/import error. See details below."
-        )
-        # Show the full traceback in a code block to help debugging during deploys
-        st.code(tb)
-        return None
-
-    try:
-        return MeasurementInstrumentAgent(excel_path, sheet_name=sheet_name)
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        st.error(f"Error initializing agent: {e}")
-        st.code(tb)
-        return None
+    
+    from backend.agent_core import MeasurementInstrumentAgent
+    return MeasurementInstrumentAgent(excel_path, sheet_name=sheet_name)
 
 
 def build_dataset_context(df):

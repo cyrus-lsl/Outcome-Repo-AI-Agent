@@ -161,10 +161,8 @@ def call_huggingface_chat(prompt, df):
                 part += f"**Scale:** {ins['scale']}  \n"
             if ins['validated']:
                 part += f"**Validated in HK:** {ins['validated']}  \n"
-            
-                # Include programme-level flag when available
-                if ins.get('programme_level'):
-                    part += f"**Programme-level metric?:** {ins.get('programme_level')}  \n"
+            if ins['programme_level']:
+                part += f"**Programme-level metric?:** {ins.get('programme_level')}  \n"
             if ins['download_eng']:
                 part += f"[Download (Eng)]({ins['download_eng']})  \n"
             if ins['citation']:

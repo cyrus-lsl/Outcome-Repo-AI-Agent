@@ -364,6 +364,8 @@ def render_chat_page(agent, df):
                                     st.markdown(f"[Download (Eng)]({ins.get('download_eng')})")
                                 if ins.get('sample_q1'):
                                     st.markdown(f"**Sample item:** {ins.get('sample_q1')}  ")
+                    # store assistant message in history
+                    st.session_state.messages.append(assistant_msg)
                 else:
                     assistant_msg = {
                         'role': 'assistant',
@@ -372,9 +374,9 @@ def render_chat_page(agent, df):
                         'unknown': None
                     }
                     st.markdown(assistant_msg['content'])
-
-        # store assistant message in history
-        st.session_state.messages.append(assistant_msg)
+                    # store assistant message in history
+                    st.session_state.messages.append(assistant_msg)
+        
 
     if st.button("Clear Chat History"):
         st.session_state.messages = []

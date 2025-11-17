@@ -62,18 +62,19 @@ def call_huggingface_chat(prompt, df):
             base_url="https://router.huggingface.co/v1",
             api_key=os.environ["HF_TOKEN"],
         )
-        
         context = build_dataset_context(df)
-        
-        system_message = """You are an expert research assistant specializing in measurement instruments. 
-        Provide detailed, practical advice about selecting and using measurement tools."""
-        
-        user_message = f"""DATABASE OF MEASUREMENT INSTRUMENTS:
-{context}
 
-USER QUESTION: {prompt}
+        system_message = (
+            "You are an assistant that MUST select only instrument NAMES from the provided DATABASE. "
+            "Do NOT invent instruments or provide any information not present in the DATABASE. "
+            "Return ONLY a JSON array of matching instrument names (e.g. [\"Name A\", \"Name B\"])."
+        )
 
-Please provide a comprehensive, helpful response about measurement instruments."""
+        user_message = (
+            f"DATABASE OF MEASUREMENT INSTRUMENTS:\n{context}\n\n"
+            f"USER QUERY: {prompt}\n\n"
+            "Return a JSON array of up to 6 instrument names from the database that best match the user query."
+        )
 
         completion = client.chat.completions.create(
             model="moonshotai/Kimi-K2-Instruct-0905",
@@ -81,11 +82,47 @@ Please provide a comprehensive, helpful response about measurement instruments."
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message}
             ],
-            max_tokens=1000,
-            temperature=0.7
+            max_tokens=400,
+            temperature=0.0
         )
-        
-        return completion.choices[0].message.content
+
+        llm_text = completion.choices[0].message.content
+
+        import json
+        names = []
+        try:
+            parsed = json.loads(llm_text)
+            if isinstance(parsed, list):
+                names = [str(x).strip() for x in parsed if x]
+        except Exception:
+            names = [line.strip(' -') for line in llm_text.split('\n') if line.strip()]
+
+        matched = []
+        for nm in names:
+            match = df[df['Measurement Instrument'].str.contains(nm, case=False, na=False)]
+            if not match.empty:
+                matched.append(match.iloc[0])
+
+        if not matched:
+            return "No matching instruments found in the database."
+
+        out_parts = []
+        for row in matched:
+            name = row.get('Measurement Instrument', '')
+            acronym = row.get('Acronym', '')
+            purpose = row.get('Purpose', '')
+            target = row.get('Target Group(s)', '')
+            domain = row.get('Outcome Domain', '')
+
+            part = f"- {name}"
+            if acronym:
+                part += f" ({acronym})"
+            if domain:
+                part += f" — {domain}"
+            part += f"\n  Purpose: {purpose}\n  Target: {target}\n"
+            out_parts.append(part)
+
+        return "\n\n".join(out_parts)
         
     except Exception as e:
         return f"❌ Error calling Hugging Face AI: {str(e)}"

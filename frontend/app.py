@@ -70,16 +70,20 @@ def call_huggingface_chat(prompt, df):
             api_key=hf,
         )
         context = build_dataset_context(df)
+        # Provide full instrument list to the model and require selection only
+        # from that list to avoid invented names.
+        instrument_names = [str(n) for n in df['Measurement Instrument'].dropna().unique().tolist()]
 
         system_message = (
-            "You are an assistant that select only instrument NAMES from the provided DATABASE. "
-            "Return ONLY a JSON array of matching instrument names (e.g. [\"Name A\", \"Name B\"])."
+            "You are an assistant that selects only instrument NAMES from the provided DATABASE. "
+            "You will be given the full list of available instrument names. Do NOT invent any names. "
+            "Return ONLY a valid JSON array (e.g. [\"Name A\", \"Name B\"]) containing up to 6 names that appear in the provided list."
         )
 
         user_message = (
-            f"DATABASE OF MEASUREMENT INSTRUMENTS:\n{context}\n\n"
+            f"DATABASE OF MEASUREMENT INSTRUMENTS:\nAvailable instruments:\n{chr(10).join(['- ' + n for n in instrument_names])}\n\n"
             f"USER QUERY: {prompt}\n\n"
-            "Return a JSON array of up to 6 instrument names from the database that best match the user query."
+            "Return a JSON array of up to 6 instrument names from the provided list that best match the user query."
         )
 
         completion = client.chat.completions.create(
@@ -102,18 +106,24 @@ def call_huggingface_chat(prompt, df):
                 names = [str(x).strip() for x in parsed if x]
         except Exception:
             names = [line.strip(' -') for line in llm_text.split('\n') if line.strip()]
-
+        # Validate that returned names actually exist in the spreadsheet (case-insensitive)
         matched = []
+        unknown = []
+        available_set = {n.lower() for n in instrument_names}
         import re
         for nm in names:
-            # Use literal substring match to avoid regex issues when names
-            # include parentheses or other metacharacters.
+            if nm.strip().lower() not in available_set:
+                unknown.append(nm)
+                continue
             try:
                 match = df[df['Measurement Instrument'].str.contains(nm, case=False, na=False, regex=False)]
             except TypeError:
                 match = df[df['Measurement Instrument'].str.contains(re.escape(nm), case=False, na=False)]
             if not match.empty:
                 matched.append(match.iloc[0])
+
+        if unknown and os.getenv('DEBUG_HF') == '1':
+            print('[DEBUG_HF] Model returned names not in spreadsheet and were ignored:', unknown)
 
         if not matched:
             return "No matching instruments found in the database."

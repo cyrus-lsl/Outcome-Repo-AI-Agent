@@ -302,19 +302,36 @@ def render_chat_page(agent, df):
             else:
                 st.markdown(message.get('content', ''))
 
-    # Chat-level UI toggles for stricter filters (kept in the sidebar so they
-    # remain visible and in a fixed position across reruns)
-    chat_validated_only = st.sidebar.checkbox("Require HK-validated only", value=False)
-    chat_prog_only = st.sidebar.checkbox("Programme-level only", value=False)
+    # Render chat messages above, then render persistent controls and the
+    # chat input at the bottom inside a reserved placeholder so the toggles
+    # appear just above the enquiry input and remain in-place across reruns.
+    bottom_area = st.empty()
+    with bottom_area.container():
+        col1, col2 = st.columns([1, 1])
+        # Use session_state to persist values between reruns
+        if 'chat_validated_only' not in st.session_state:
+            st.session_state.chat_validated_only = False
+        if 'chat_prog_only' not in st.session_state:
+            st.session_state.chat_prog_only = False
+        with col1:
+            st.session_state.chat_validated_only = st.checkbox("Require HK-validated only", value=st.session_state.chat_validated_only)
+        with col2:
+            st.session_state.chat_prog_only = st.checkbox("Programme-level only", value=st.session_state.chat_prog_only)
 
-    if prompt := st.chat_input("Ask about measurement instruments..."):
-        # Render the user's message immediately so it's visible in the chat UI
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("assistant"):
-            with st.spinner("🤔 Thinking..."):
-                response = call_huggingface_chat(prompt, df, validated_only=chat_validated_only, prog_only=chat_prog_only, max_results=8)
+        if prompt := st.chat_input("Ask about measurement instruments..."):
+            # Render the user's message immediately so it's visible in the chat UI
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("assistant"):
+                with st.spinner("🤔 Thinking..."):
+                    response = call_huggingface_chat(
+                        prompt,
+                        df,
+                        validated_only=st.session_state.chat_validated_only,
+                        prog_only=st.session_state.chat_prog_only,
+                        max_results=8,
+                    )
 
                 # Build assistant message object
                 if isinstance(response, dict) and 'matched' in response:
@@ -394,13 +411,22 @@ def render_manual_search_page(agent, df):
     if "Program-level metrics" in selected_filters:
         prog_level = st.selectbox("Program-level metrics", ["both", "yes", "no"])
 
+    # Bottom-of-page toggles for Manual Search (kept near the Search button)
+    mcol1, mcol2 = st.columns([1, 1])
+    manual_validated_only = mcol1.checkbox("Require HK-validated only", value=False)
+    manual_prog_only = mcol2.checkbox("Programme-level only", value=False)
+
     if st.button("Search"):
         try:
+            # If the manual-only toggles are set, override the selectbox values
+            validated_param = 'yes' if manual_validated_only else validated
+            prog_level_param = 'yes' if manual_prog_only else prog_level
+
             results = agent.manual_search(
                 beneficiaries=beneficiaries,
                 measure=measure,
-                validated=validated,
-                prog_level=prog_level
+                validated=validated_param,
+                prog_level=prog_level_param
             )
             recs = results.get('recommendations', []) if isinstance(results, dict) else []
             if not recs:

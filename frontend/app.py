@@ -274,6 +274,17 @@ def render_chat_page(agent, df):
         "- Manual search with filters on the Manual Search page"
     )
 
+    # Chat-level toggles placed directly under the "What I can do" section
+    if 'chat_validated_only' not in st.session_state:
+        st.session_state.chat_validated_only = False
+    if 'chat_prog_only' not in st.session_state:
+        st.session_state.chat_prog_only = False
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.session_state.chat_validated_only = st.checkbox("Require HK-validated only", value=st.session_state.chat_validated_only)
+    with c2:
+        st.session_state.chat_prog_only = st.checkbox("Programme-level only", value=st.session_state.chat_prog_only)
+
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
@@ -313,17 +324,6 @@ def render_chat_page(agent, df):
     # appear just above the enquiry input and remain in-place across reruns.
     bottom_area = st.empty()
     with bottom_area.container():
-        col1, col2 = st.columns([1, 1])
-        # Use session_state to persist values between reruns
-        if 'chat_validated_only' not in st.session_state:
-            st.session_state.chat_validated_only = False
-        if 'chat_prog_only' not in st.session_state:
-            st.session_state.chat_prog_only = False
-        with col1:
-            st.session_state.chat_validated_only = st.checkbox("Require HK-validated only", value=st.session_state.chat_validated_only)
-        with col2:
-            st.session_state.chat_prog_only = st.checkbox("Programme-level only", value=st.session_state.chat_prog_only)
-
         if prompt := st.chat_input("Ask about measurement instruments..."):
             # Render the user's message immediately so it's visible in the chat UI
             with st.chat_message("user"):

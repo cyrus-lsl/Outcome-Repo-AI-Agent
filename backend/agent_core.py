@@ -160,16 +160,26 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
         return self.search(query, max_results=top_k)
 
     def manual_search(self, beneficiaries=None, measure=None, validated='both', prog_level='both', top_k=10):
+        # Build a natural-language query including the provided filters and
+        # let the Hugging Face LLM pick the best instruments from the dataset.
         parts = []
         if measure:
-            parts.append(str(measure))
+            parts.append(f"Measure: {measure}")
         if beneficiaries:
             if isinstance(beneficiaries, list):
-                parts.extend([str(b) for b in beneficiaries])
+                parts.append("Beneficiaries: " + ", ".join(beneficiaries))
             else:
-                parts.append(str(beneficiaries))
-        q = ' '.join(parts).strip() or (measure or '')
+                parts.append(f"Beneficiaries: {beneficiaries}")
+        if validated and validated != 'both':
+            parts.append(f"Validated in Hong Kong: {validated}")
+        if prog_level and prog_level != 'both':
+            parts.append(f"Program-level metric: {prog_level}")
+
+        q = '; '.join(parts).strip() or (measure or '')
+
+        # Delegate selection to the LLM (search() uses HF-first)
         results = self.search(q, max_results=top_k)
+
         formatted = {'query': q, 'recommendations': []}
         for r in results:
             ins = r['instrument']
@@ -179,7 +189,7 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 'purpose': ins.get('Purpose', ''),
                 'target_group': ins.get('Target Group(s)', ''),
                 'domain': ins.get('Outcome Domain', ''),
-                'similarity_score': None,
+                'similarity_score': r.get('similarity_score'),
             })
         return formatted
 

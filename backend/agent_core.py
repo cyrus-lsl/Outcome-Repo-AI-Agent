@@ -24,12 +24,17 @@ class InstrumentSearcher:
         """Search for instruments matching the query"""
         instrument_names = self.df['Measurement Instrument'].tolist()
         
-        prompt = f"""You are a professional assistant to help users find suitable measurement instruments. Your total max output is 300 words at anytime. Available measurement instruments:
-{chr(10).join([f'- {name}' for name in instrument_names if name])}
+        prompt = f"""You are a professional assistant to help users find suitable measurement instruments.
+        Available measurement instruments (exact names):
+        {chr(10).join([f'- {name}' for name in instrument_names if name])}
 
-User query: "{query}"
+        User query: "{query}"
 
-Return ONLY the names of the most relevant instruments (max {max_results}) that match the query, one per line. No explanations, just the instrument names:"""
+        INSTRUCTIONS:
+        - Choose ONLY from the instrument names listed above. Do NOT invent, hallucinate, or add instruments that are not in the list.
+        - Return ONLY the exact instrument names that match the query (max {max_results}), one per line.
+        - Do NOT include explanations, numbering, bullets, or any extra text. If there are no matches, return a single empty response (no text).
+        """
 
         client = self._get_client()
         response = None
@@ -37,8 +42,8 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
             response = client.chat.completions.create(
                 model="moonshotai/Kimi-K2-Instruct-0905",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=300,
-                temperature=0.1
+                max_tokens=200,
+                temperature=0.0
             )
         except Exception as e:
             print(e)

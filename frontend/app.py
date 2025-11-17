@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import sys
 import pathlib
+import re
 from openai import OpenAI
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -153,6 +154,13 @@ def call_huggingface_chat(prompt, df):
 def render_chat_page(agent, df):
     """Render the chat interface"""
     st.subheader("💬 Chat with AI Assistant")
+    # Brief capabilities summary shown on the chat page per user request.
+    st.markdown("### What I can do")
+    st.markdown(
+        "- Search the instrument database using natural-language queries (e.g. 'mental health of elderly')\n"
+        "- Return matched instruments with purpose, target group and domain\n"
+        "- Manual search with filters on the Manual Search page"
+    )
     
     # Initialize chat history
     if "messages" not in st.session_state:

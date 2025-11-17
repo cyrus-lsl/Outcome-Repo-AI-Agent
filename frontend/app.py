@@ -73,10 +73,45 @@ def call_huggingface_chat(prompt, df):
 
     client = OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf)
 
-    # Build instrument lines and name list
+    # Detect whether user explicitly asked for instruments validated in Hong Kong
+    prompt_l = str(prompt or '').lower()
+    want_validated_hk = False
+    try:
+        if re.search(r"validated.*hong|validated.*hk|validated in hong|validate.*hong|validate.*hk", prompt_l):
+            want_validated_hk = True
+    except Exception:
+        want_validated_hk = False
+
+    # Helper: detect whether a free-text 'Validated in Hong Kong' cell indicates
+    # validation in HK. Spreadsheet values are heterogenous, so we use a
+    # conservative heuristic.
+    def _validated_in_hk_text(x):
+        s = str(x or '').lower().strip()
+        if not s or s in ('-', 'na', 'n/a'):
+            return False
+        if 'not validated' in s or 'not validated in hong' in s or re.search(r"\bno\b", s):
+            return False
+        if s.startswith('yes'):
+            return True
+        if ('hong' in s or 'hk' in s or 'hong kong' in s) and ('valid' in s or 'develop' in s or 'refer to' in s):
+            return True
+        if 'validated' in s and 'hong' in s:
+            return True
+        return False
+
+    # Optionally filter the dataframe to only instruments validated in HK
+    df_for_model = df
+    if want_validated_hk and 'Validated in Hong Kong' in df.columns:
+        try:
+            df_for_model = df[df['Validated in Hong Kong'].apply(_validated_in_hk_text)]
+        except Exception:
+            # If any problem filtering, fall back to full df but keep want_validated_hk flag
+            df_for_model = df
+
+    # Build instrument lines and name list from df_for_model
     inst_lines = []
     instrument_names = []
-    for _, row in df.iterrows():
+    for _, row in df_for_model.iterrows():
         name = str(row.get('Measurement Instrument', '')).strip()
         if not name:
             continue
@@ -95,6 +130,7 @@ def call_huggingface_chat(prompt, df):
     user_message = (
         f"DATABASE OF MEASUREMENT INSTRUMENTS:\nEach line: Name | Domain | Target(s) | Programme-level\n{chr(10).join(inst_lines)}\n\n"
         f"USER QUERY: {prompt}\n\n"
+        + ("NOTE: The user requested only instruments validated in Hong Kong.\n" if want_validated_hk else "")
         + "Choose up to 6 instruments from the provided list that best match the user query, considering Domain, Purpose and Target groups. Return a JSON array with instrument names only."
     )
 
@@ -182,6 +218,18 @@ def call_huggingface_chat(prompt, df):
         filtered = matched
         filter_note = ' (note: heuristics did not find stricter matches; showing best matches)'
 
+    # If user explicitly requested HK-validated instruments, enforce that the
+    # final results are validated in HK. If no validated instruments matched,
+    # return a clear message.
+    if want_validated_hk:
+        validated_filtered = [ins for ins in filtered if str(ins.get('validated', '')).strip().lower() in ('yes', 'y', 'true')]
+        if validated_filtered:
+            filtered = validated_filtered
+            filter_note = ''
+        else:
+            # No validated instruments among filtered results.
+            return {'text': 'No instruments validated in Hong Kong found matching the query.', 'matched': [], 'unknown': unknown}
+
     # Build markdown summary
     out_parts = []
     for ins in filtered:
@@ -245,6 +293,9 @@ def render_chat_page(agent, df):
                 st.markdown(message.get('content', ''))
 
     if prompt := st.chat_input("Ask about measurement instruments..."):
+        # Render the user's message immediately so it appears in the chat UI
+        with st.chat_message("user"):
+            st.markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("assistant"):
             with st.spinner("🤔 Thinking..."):

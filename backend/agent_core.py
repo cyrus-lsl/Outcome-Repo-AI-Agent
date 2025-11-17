@@ -4,6 +4,32 @@ import difflib
 import re
 from openai import OpenAI
 
+
+def _validated_in_hk_text(x: object) -> bool:
+    """Heuristic: return True when the text indicates validation in Hong Kong.
+
+    The spreadsheet entries are heterogeneous ("Yes. Refer to...", long
+    sentences, "Developed and validated in HK."). This tries to detect
+    positive signals and avoids false positives when the text explicitly
+    says "Not validated in Hong Kong".
+    """
+    s = str(x or '').lower()
+    s = s.strip()
+    if not s or s in ('-', 'na', 'n/a'):
+        return False
+    # Negative patterns first
+    if 'not validated' in s or 'not validated in hong' in s or re.search(r'\bno\b', s):
+        return False
+    # Positive when explicit yes or mentions HK/Hong Kong together with 'valid'
+    if s.startswith('yes'):
+        return True
+    if ('hong' in s or 'hk' in s or 'hong kong' in s) and ('valid' in s or 'develop' in s or 'refer to' in s):
+        return True
+    # fallback: any explicit 'validated' mention counts unless it's negated
+    if 'validated' in s and 'hong' in s:
+        return True
+    return False
+
 class InstrumentSearcher:
     def __init__(self, excel_file_path, sheet_name=None, header_row=None):
         read_kwargs = {}
@@ -39,11 +65,9 @@ class InstrumentSearcher:
         return self._client
     
     def search(self, query, max_results=5, df_override=None):
-        """Search for instruments matching the query. Optional df_override can
-        be provided to restrict the search to a subset of the dataset (e.g.
-        programme-level instruments only)."""
-        df_local = df_override if df_override is not None else self.df
-        instrument_names = df_local['Measurement Instrument'].tolist()
+        """Search for instruments matching the query"""
+        df_to_use = df_override if df_override is not None else self.df
+        instrument_names = df_to_use['Measurement Instrument'].tolist()
         
         prompt = f"""You are a professional assistant to help users find suitable measurement instruments. Your total max output is 300 words at anytime. Available measurement instruments:
 {chr(10).join([f'- {name}' for name in instrument_names if name])}
@@ -113,14 +137,14 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 # instrument names contain special characters. pandas' str.contains
                 # supports regex=False for literal matching.
                 try:
-                    match = df_local[
-                        df_local['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)
+                    match = df_to_use[
+                        df_to_use['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)
                     ]
                 except TypeError:
                     # Older pandas versions may not accept regex kw; fallback to
                     # escaping the pattern for regex matching.
-                    match = self.df[
-                        self.df['Measurement Instrument'].str.contains(re.escape(name), case=False, na=False)
+                    match = df_to_use[
+                        df_to_use['Measurement Instrument'].str.contains(re.escape(name), case=False, na=False)
                     ]
                 # if not found, try fuzzy match against available instrument names
                 if match.empty:
@@ -128,12 +152,12 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                     if candidates:
                         cand = candidates[0]
                         try:
-                            match = df_local[
-                                df_local['Measurement Instrument'].str.contains(cand, case=False, na=False, regex=False)
+                            match = df_to_use[
+                                df_to_use['Measurement Instrument'].str.contains(cand, case=False, na=False, regex=False)
                             ]
                         except TypeError:
-                            match = self.df[
-                                self.df['Measurement Instrument'].str.contains(re.escape(cand), case=False, na=False)
+                            match = df_to_use[
+                                df_to_use['Measurement Instrument'].str.contains(re.escape(cand), case=False, na=False)
                             ]
                         if os.getenv('DEBUG_HF') == '1':
                             print(f"[DEBUG_HF] Fuzzy-matched '{name}' -> '{cand}'")
@@ -146,7 +170,7 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
         if not qtokens:
             return []
         scores = []
-        for i, row in self.df.iterrows():
+        for i, row in df_to_use.iterrows():
             # Use combined_text if provided, otherwise join all string fields in the row
             text = str(row.get('combined_text', '')).lower()
             if not text:
@@ -156,11 +180,11 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 scores.append((score, i))
         scores.sort(reverse=True)
         for score, idx in scores[:max_results]:
-            results.append({'instrument': df_local.iloc[idx], 'similarity_score': float(score)})
+            results.append({'instrument': self.df.iloc[idx], 'similarity_score': float(score)})
         return results
 
-    def search_instruments(self, query, top_k=3, df_override=None):
-        return self.search(query, max_results=top_k, df_override=df_override)
+    def search_instruments(self, query, top_k=3):
+        return self.search(query, max_results=top_k)
 
     def manual_search(self, beneficiaries=None, measure=None, validated='both', prog_level='both', top_k=10):
         # Build a natural-language query including the provided filters and
@@ -180,22 +204,22 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
 
         q = '; '.join(parts).strip() or (measure or '')
 
-        # Determine whether we should restrict the dataset to programme-level
-        # instruments before delegating selection to the LLM.
-        df_override = None
-        try:
-            if prog_level and prog_level != 'both':
-                want = str(prog_level).strip().lower()
-                if want in ('yes', 'y', 'true', '1'):
-                    df_override = self.df[self.df.get('Programme-level metric?', '').astype(str).str.strip().str.lower() == 'yes']
-                elif want in ('no', 'n', 'false', '0'):
-                    df_override = self.df[self.df.get('Programme-level metric?', '').astype(str).str.strip().str.lower() == 'no']
-        except Exception:
-            df_override = None
+        # Prepare optional dataframe filtering for validated/prog_level
+        df_filtered = self.df
+        if validated and validated != 'both' and 'Validated in Hong Kong' in self.df.columns:
+            if str(validated).strip().lower() in ('yes', 'y', 'true'):
+                df_filtered = df_filtered[df_filtered['Validated in Hong Kong'].apply(_validated_in_hk_text)]
+            else:
+                df_filtered = df_filtered[~df_filtered['Validated in Hong Kong'].apply(_validated_in_hk_text)]
 
-        # Delegate selection to the LLM (search() uses HF-first). Pass df_override
-        # so the LLM is only given instruments from the requested subset.
-        results = self.search(q, max_results=top_k, df_override=df_override)
+        if prog_level and prog_level != 'both' and 'Programme-level metric?' in self.df.columns:
+            if str(prog_level).strip().lower() in ('yes', 'y', 'true'):
+                df_filtered = df_filtered[df_filtered['Programme-level metric?'].astype(str).str.strip().str.lower().isin(['yes','y','true'])]
+            else:
+                df_filtered = df_filtered[~df_filtered['Programme-level metric?'].astype(str).str.strip().str.lower().isin(['yes','y','true'])]
+
+        # Delegate selection to the LLM (search() uses HF-first) using the filtered df
+        results = self.search(q, max_results=top_k, df_override=df_filtered)
 
         formatted = {'query': q, 'recommendations': []}
         for r in results:

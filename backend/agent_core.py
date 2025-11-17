@@ -30,6 +30,9 @@ class InstrumentSearcher:
     def _get_client(self):
         if self._client is None:
             hf = os.environ.get('HF_TOKEN')
+            # If the token is stored with surrounding quotes in .env, strip them.
+            if isinstance(hf, str):
+                hf = hf.strip().strip('\"\'')
             if not hf:
                 raise RuntimeError('HF_TOKEN not set in environment; cannot call Hugging Face APIs')
             self._client = OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf)

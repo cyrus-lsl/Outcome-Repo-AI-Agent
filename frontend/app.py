@@ -58,9 +58,16 @@ def build_dataset_context(df):
 def call_huggingface_chat(prompt, df):
     """Call Hugging Face chat model for responses"""
     try:
+        # Read HF token robustly (allow quoted tokens in .env)
+        hf = os.environ.get("HF_TOKEN")
+        if isinstance(hf, str):
+            hf = hf.strip().strip('\"\'')
+        if not hf:
+            raise RuntimeError('HF_TOKEN not set in environment')
+
         client = OpenAI(
             base_url="https://router.huggingface.co/v1",
-            api_key=os.environ["HF_TOKEN"],
+            api_key=hf,
         )
         context = build_dataset_context(df)
 

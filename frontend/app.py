@@ -107,6 +107,7 @@ def call_huggingface_chat(prompt, df):
                 names = [str(x).strip() for x in parsed if x]
         except Exception:
             names = [line.strip(' -') for line in llm_text.split('\n') if line.strip()]
+
         # Validate that returned names actually exist in the spreadsheet (case-insensitive)
         matched = []
         unknown = []
@@ -121,31 +122,52 @@ def call_huggingface_chat(prompt, df):
             except TypeError:
                 match = df[df['Measurement Instrument'].str.contains(re.escape(nm), case=False, na=False)]
             if not match.empty:
-                matched.append(match.iloc[0])
+                r = match.iloc[0]
+                # Build a structured dict for the instrument
+                matched.append({
+                    'name': r.get('Measurement Instrument', ''),
+                    'acronym': r.get('Acronym', ''),
+                    'purpose': r.get('Purpose', ''),
+                    'target': r.get('Target Group(s)', ''),
+                    'domain': r.get('Outcome Domain', ''),
+                    'no_of_items': r.get('No. of Questions / Statements', ''),
+                    'sample_q1': r.get('Sample Question / Statement - 1', ''),
+                    'sample_q2': r.get('Sample Question / Statement - 2', ''),
+                    'sample_q3': r.get('Sample Question / Statement - 3', ''),
+                    'scale': r.get('Scale', ''),
+                    'scoring': r.get('Scoring', ''),
+                    'validated': r.get('Validated in Hong Kong', ''),
+                    'download_eng': r.get('Download (Eng)', ''),
+                    'download_chi': r.get('Download (Chi)', ''),
+                    'citation': r.get('Citation', ''),
+                })
 
         if unknown and os.getenv('DEBUG_HF') == '1':
             print('[DEBUG_HF] Model returned names not in spreadsheet and were ignored:', unknown)
 
         if not matched:
-            return "No matching instruments found in the database."
+            return {'text': 'No matching instruments found in the database.', 'matched': [], 'unknown': unknown}
 
+        # Build a readable markdown summary as well as structured results
         out_parts = []
-        for row in matched:
-            name = row.get('Measurement Instrument', '')
-            acronym = row.get('Acronym', '')
-            purpose = row.get('Purpose', '')
-            target = row.get('Target Group(s)', '')
-            domain = row.get('Outcome Domain', '')
-
-            part = f"- {name}"
-            if acronym:
-                part += f" ({acronym})"
-            if domain:
-                part += f" — {domain}"
-            part += f"\n  Purpose: {purpose}\n  Target: {target}\n"
+        for ins in matched:
+            part = f"**{ins['name']}" + (f" ({ins['acronym']})" if ins['acronym'] else '') + f"** — {ins['domain']}\n\n"
+            part += f"**Purpose:** {ins['purpose']}  \n"
+            part += f"**Target:** {ins['target']}  \n"
+            if ins['no_of_items']:
+                part += f"**Items:** {ins['no_of_items']}  \n"
+            if ins['scale']:
+                part += f"**Scale:** {ins['scale']}  \n"
+            if ins['validated']:
+                part += f"**Validated in HK:** {ins['validated']}  \n"
+            if ins['download_eng']:
+                part += f"[Download (Eng)]({ins['download_eng']})  \n"
+            if ins['citation']:
+                part += f"**Citation:** {ins['citation']}  \n"
             out_parts.append(part)
 
-        return "\n\n".join(out_parts)
+        md = "\n\n".join(out_parts)
+        return {'text': md, 'matched': matched, 'unknown': unknown}
         
     except Exception as e:
         return f"❌ Error calling Hugging Face AI: {str(e)}"
@@ -184,9 +206,37 @@ def render_chat_page(agent, df):
         with st.chat_message("assistant"):
             with st.spinner("🤔 Thinking..."):
                 response = call_huggingface_chat(prompt, df)
-                st.markdown(response)
-                
-        st.session_state.messages.append({"role": "assistant", "content": response})
+                # If structured response returned, render expanders; otherwise print text
+                if isinstance(response, dict) and 'matched' in response:
+                    if not response['matched']:
+                        st.markdown(response.get('text', 'No matching instruments found in the database.'))
+                        display_text = response.get('text', '')
+                    else:
+                        display_text = ''
+                        for ins in response['matched']:
+                            with st.expander(ins.get('name', '') + (f" ({ins.get('acronym')})" if ins.get('acronym') else '')):
+                                st.markdown(f"**Domain:** {ins.get('domain','')}  ")
+                                st.markdown(f"**Purpose:** {ins.get('purpose','')}  ")
+                                st.markdown(f"**Target:** {ins.get('target','')}  ")
+                                if ins.get('no_of_items'):
+                                    st.markdown(f"**Items:** {ins.get('no_of_items')}  ")
+                                if ins.get('scale'):
+                                    st.markdown(f"**Scale:** {ins.get('scale')}  ")
+                                if ins.get('scoring'):
+                                    st.markdown(f"**Scoring:** {ins.get('scoring')}  ")
+                                if ins.get('validated'):
+                                    st.markdown(f"**Validated in HK:** {ins.get('validated')}  ")
+                                if ins.get('download_eng'):
+                                    st.markdown(f"[Download (Eng)]({ins.get('download_eng')})")
+                                if ins.get('sample_q1'):
+                                    st.markdown(f"**Sample item:** {ins.get('sample_q1')}  ")
+                                # collect names for session display
+                                display_text += f"{ins.get('name','')}\n"
+                else:
+                    st.markdown(response)
+                    display_text = response if isinstance(response, str) else str(response)
+
+        st.session_state.messages.append({"role": "assistant", "content": display_text})
 
     # Clear chat button
     if st.button("Clear Chat History"):
@@ -235,16 +285,25 @@ def render_manual_search_page(agent, df):
             st.error("Agent not available. Using basic filtering.")
             return
 
-        try:
-            results = agent.manual_search(
-                beneficiaries=beneficiaries,
-                measure=measure, 
-                validated=validated,
-                prog_level=prog_level
-            )
-            st.markdown(agent.format_response(results))
-        except Exception as e:
-            st.error(f"Search error: {e}")
+            try:
+                results = agent.manual_search(
+                    beneficiaries=beneficiaries,
+                    measure=measure, 
+                    validated=validated,
+                    prog_level=prog_level
+                )
+                # results is a dict with 'recommendations'
+                recs = results.get('recommendations', []) if isinstance(results, dict) else []
+                if not recs:
+                    st.markdown('No matching instruments found.')
+                else:
+                    for ins in recs:
+                        with st.expander(ins.get('name', '') + (f" ({ins.get('acronym')})" if ins.get('acronym') else '')):
+                            st.markdown(f"**Domain:** {ins.get('domain','')}  ")
+                            st.markdown(f"**Purpose:** {ins.get('purpose','')}  ")
+                            st.markdown(f"**Target:** {ins.get('target_group','')}  ")
+            except Exception as e:
+                st.error(f"Search error: {e}")
 
 
 def main():

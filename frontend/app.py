@@ -229,6 +229,8 @@ def render_chat_page(agent, df):
                                     st.markdown(f"**Scoring:** {ins.get('scoring')}  ")
                                 if ins.get('validated'):
                                     st.markdown(f"**Validated in HK:** {ins.get('validated')}  ")
+                                if ins.get('programme_level'):
+                                    st.markdown(f"**Programme-level metric?:** {ins.get('programme_level')}  ")
                                 if ins.get('download_eng'):
                                     st.markdown(f"[Download (Eng)]({ins.get('download_eng')})")
                                 if ins.get('sample_q1'):
@@ -305,6 +307,8 @@ def render_manual_search_page(agent, df):
                             st.markdown(f"**Domain:** {ins.get('domain','')}  ")
                             st.markdown(f"**Purpose:** {ins.get('purpose','')}  ")
                             st.markdown(f"**Target:** {ins.get('target_group','')}  ")
+                            if ins.get('programme_level'):
+                                st.markdown(f"**Programme-level metric?:** {ins.get('programme_level')}  ")
             except Exception as e:
                 st.error(f"Search error: {e}")
 

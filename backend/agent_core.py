@@ -2,7 +2,7 @@ import pandas as pd
 import os
 from openai import OpenAI
 
-class InstrumentSearcher:
+class MeasurementInstrumentAgent:
     def __init__(self, excel_file_path, sheet_name=None, header_row=None):
         read_kwargs = {}
         if sheet_name is not None:
@@ -29,7 +29,7 @@ class InstrumentSearcher:
 
 User query: "{query}"
 
-Return ONLY the names of the most relevant instruments (max {max_results}) that match the query, one per line. No explanations, just the instrument names:"""
+Return ONLY the names of the most relevant instruments (max {max_results}) that match the query, one per line. Output the information that can be found in the xlsx file only. No explanations, just the instrument names:"""
 
         client = self._get_client()
         response = None
@@ -136,5 +136,3 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
             output += f"   Domain: {instrument['domain']}\n\n"
         
         return output
-
-MeasurementInstrumentAgent = InstrumentSearcher

@@ -65,8 +65,7 @@ def call_huggingface_chat(prompt, df):
         context = build_dataset_context(df)
 
         system_message = (
-            "You are an assistant that MUST select only instrument NAMES from the provided DATABASE. "
-            "Do NOT invent instruments or provide any information not present in the DATABASE. "
+            "You are an assistant that select only instrument NAMES from the provided DATABASE. "
             "Return ONLY a JSON array of matching instrument names (e.g. [\"Name A\", \"Name B\"])."
         )
 

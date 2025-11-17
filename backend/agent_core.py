@@ -80,11 +80,6 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
         return self.search(query, max_results=top_k)
 
     def manual_search(self, beneficiaries=None, measure=None, validated='both', prog_level='both', top_k=10):
-        """Simple manual search wrapper: constructs a short natural-language query
-        from the beneficiaries/measure inputs and uses the HF-backed `search` to
-        find matching instruments. Returns the same formatted dict structure the
-        frontend expects: { 'query': ..., 'recommendations': [...] }
-        """
         parts = []
         if measure:
             parts.append(str(measure))

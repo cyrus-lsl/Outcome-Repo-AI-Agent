@@ -189,6 +189,7 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 'purpose': ins.get('Purpose', ''),
                 'target_group': ins.get('Target Group(s)', ''),
                 'domain': ins.get('Outcome Domain', ''),
+                'programme_level': ins.get('Programme-level metric?', ''),
                 'similarity_score': r.get('similarity_score'),
             })
         return formatted

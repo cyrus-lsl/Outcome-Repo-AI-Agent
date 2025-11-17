@@ -137,6 +137,7 @@ def call_huggingface_chat(prompt, df):
                     'scale': r.get('Scale', ''),
                     'scoring': r.get('Scoring', ''),
                     'validated': r.get('Validated in Hong Kong', ''),
+                    'programme_level': r.get('Programme-level metric?', ''),
                     'download_eng': r.get('Download (Eng)', ''),
                     'download_chi': r.get('Download (Chi)', ''),
                     'citation': r.get('Citation', ''),
@@ -160,6 +161,10 @@ def call_huggingface_chat(prompt, df):
                 part += f"**Scale:** {ins['scale']}  \n"
             if ins['validated']:
                 part += f"**Validated in HK:** {ins['validated']}  \n"
+            
+                # Include programme-level flag when available
+                if ins.get('programme_level'):
+                    part += f"**Programme-level metric?:** {ins.get('programme_level')}  \n"
             if ins['download_eng']:
                 part += f"[Download (Eng)]({ins['download_eng']})  \n"
             if ins['citation']:

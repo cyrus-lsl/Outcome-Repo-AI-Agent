@@ -38,9 +38,12 @@ class InstrumentSearcher:
             self._client = OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf)
         return self._client
     
-    def search(self, query, max_results=5):
-        """Search for instruments matching the query"""
-        instrument_names = self.df['Measurement Instrument'].tolist()
+    def search(self, query, max_results=5, df_override=None):
+        """Search for instruments matching the query. Optional df_override can
+        be provided to restrict the search to a subset of the dataset (e.g.
+        programme-level instruments only)."""
+        df_local = df_override if df_override is not None else self.df
+        instrument_names = df_local['Measurement Instrument'].tolist()
         
         prompt = f"""You are a professional assistant to help users find suitable measurement instruments. Your total max output is 300 words at anytime. Available measurement instruments:
 {chr(10).join([f'- {name}' for name in instrument_names if name])}
@@ -110,8 +113,8 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 # instrument names contain special characters. pandas' str.contains
                 # supports regex=False for literal matching.
                 try:
-                    match = self.df[
-                        self.df['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)
+                    match = df_local[
+                        df_local['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)
                     ]
                 except TypeError:
                     # Older pandas versions may not accept regex kw; fallback to
@@ -125,8 +128,8 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                     if candidates:
                         cand = candidates[0]
                         try:
-                            match = self.df[
-                                self.df['Measurement Instrument'].str.contains(cand, case=False, na=False, regex=False)
+                            match = df_local[
+                                df_local['Measurement Instrument'].str.contains(cand, case=False, na=False, regex=False)
                             ]
                         except TypeError:
                             match = self.df[
@@ -153,11 +156,11 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 scores.append((score, i))
         scores.sort(reverse=True)
         for score, idx in scores[:max_results]:
-            results.append({'instrument': self.df.iloc[idx], 'similarity_score': float(score)})
+            results.append({'instrument': df_local.iloc[idx], 'similarity_score': float(score)})
         return results
 
-    def search_instruments(self, query, top_k=3):
-        return self.search(query, max_results=top_k)
+    def search_instruments(self, query, top_k=3, df_override=None):
+        return self.search(query, max_results=top_k, df_override=df_override)
 
     def manual_search(self, beneficiaries=None, measure=None, validated='both', prog_level='both', top_k=10):
         # Build a natural-language query including the provided filters and
@@ -177,8 +180,22 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
 
         q = '; '.join(parts).strip() or (measure or '')
 
-        # Delegate selection to the LLM (search() uses HF-first)
-        results = self.search(q, max_results=top_k)
+        # Determine whether we should restrict the dataset to programme-level
+        # instruments before delegating selection to the LLM.
+        df_override = None
+        try:
+            if prog_level and prog_level != 'both':
+                want = str(prog_level).strip().lower()
+                if want in ('yes', 'y', 'true', '1'):
+                    df_override = self.df[self.df.get('Programme-level metric?', '').astype(str).str.strip().str.lower() == 'yes']
+                elif want in ('no', 'n', 'false', '0'):
+                    df_override = self.df[self.df.get('Programme-level metric?', '').astype(str).str.strip().str.lower() == 'no']
+        except Exception:
+            df_override = None
+
+        # Delegate selection to the LLM (search() uses HF-first). Pass df_override
+        # so the LLM is only given instruments from the requested subset.
+        results = self.search(q, max_results=top_k, df_override=df_override)
 
         formatted = {'query': q, 'recommendations': []}
         for r in results:

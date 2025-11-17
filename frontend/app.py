@@ -159,7 +159,10 @@ def call_huggingface_chat(prompt, df):
     if not matched:
         return {'text': 'No matching instruments found in the database.', 'matched': [], 'unknown': unknown}
 
-    # Post-filter by simple token overlap to remove clearly irrelevant picks
+    # Post-filter by simple token overlap to remove clearly irrelevant picks.
+    # We do NOT special-case 'validated in Hong Kong' here; natural
+    # language in the prompt will be used by the LLM and then results are
+    # heuristically checked for token overlap.
     def _lower(x):
         try:
             return str(x).lower()
@@ -173,11 +176,11 @@ def call_huggingface_chat(prompt, df):
         if any(tok in hay for tok in qtokens):
             filtered.append(ins)
 
+    filter_note = ''
+
     if not filtered:
         filtered = matched
         filter_note = ' (note: heuristics did not find stricter matches; showing best matches)'
-    else:
-        filter_note = ''
 
     # Build markdown summary
     out_parts = []
@@ -218,20 +221,48 @@ def render_chat_page(agent, df):
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            if message.get('role') == 'assistant' and message.get('matched'):
+                for ins in message.get('matched', []):
+                    with st.expander(ins.get('name', '') + (f" ({ins.get('acronym')})" if ins.get('acronym') else '')):
+                        st.markdown(f"**Domain:** {ins.get('domain','')}  ")
+                        st.markdown(f"**Purpose:** {ins.get('purpose','')}  ")
+                        st.markdown(f"**Target:** {ins.get('target','')}  ")
+                        if ins.get('no_of_items'):
+                            st.markdown(f"**Items:** {ins.get('no_of_items')}  ")
+                        if ins.get('scale'):
+                            st.markdown(f"**Scale:** {ins.get('scale')}  ")
+                        if ins.get('scoring'):
+                            st.markdown(f"**Scoring:** {ins.get('scoring')}  ")
+                        if ins.get('validated'):
+                            st.markdown(f"**Validated in HK:** {ins.get('validated')}  ")
+                        if ins.get('programme_level'):
+                            st.markdown(f"**Programme-level metric?:** {ins.get('programme_level')}  ")
+                        if ins.get('download_eng'):
+                            st.markdown(f"[Download (Eng)]({ins.get('download_eng')})")
+                        if ins.get('sample_q1'):
+                            st.markdown(f"**Sample item:** {ins.get('sample_q1')}  ")
+            else:
+                st.markdown(message.get('content', ''))
 
     if prompt := st.chat_input("Ask about measurement instruments..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("assistant"):
             with st.spinner("🤔 Thinking..."):
                 response = call_huggingface_chat(prompt, df)
+
+                # Build assistant message object
                 if isinstance(response, dict) and 'matched' in response:
-                    if not response['matched']:
-                        st.markdown(response.get('text', 'No matching instruments found in the database.'))
-                        display_text = response.get('text', '')
+                    assistant_msg = {
+                        'role': 'assistant',
+                        'content': response.get('text', 'No matching instruments found in the database.'),
+                        'matched': response.get('matched', []),
+                        'unknown': response.get('unknown', [])
+                    }
+                    # render assistant message now
+                    if not assistant_msg['matched']:
+                        st.markdown(assistant_msg['content'])
                     else:
-                        display_text = ''
-                        for ins in response['matched']:
+                        for ins in assistant_msg['matched']:
                             with st.expander(ins.get('name', '') + (f" ({ins.get('acronym')})" if ins.get('acronym') else '')):
                                 st.markdown(f"**Domain:** {ins.get('domain','')}  ")
                                 st.markdown(f"**Purpose:** {ins.get('purpose','')}  ")
@@ -250,12 +281,17 @@ def render_chat_page(agent, df):
                                     st.markdown(f"[Download (Eng)]({ins.get('download_eng')})")
                                 if ins.get('sample_q1'):
                                     st.markdown(f"**Sample item:** {ins.get('sample_q1')}  ")
-                                display_text += f"{ins.get('name','')}\n"
                 else:
-                    st.markdown(response)
-                    display_text = response if isinstance(response, str) else str(response)
+                    assistant_msg = {
+                        'role': 'assistant',
+                        'content': response if isinstance(response, str) else str(response),
+                        'matched': None,
+                        'unknown': None
+                    }
+                    st.markdown(assistant_msg['content'])
 
-        st.session_state.messages.append({"role": "assistant", "content": display_text})
+        # store assistant message in history
+        st.session_state.messages.append(assistant_msg)
 
     if st.button("Clear Chat History"):
         st.session_state.messages = []

@@ -1,5 +1,7 @@
 import pandas as pd
 import os
+import difflib
+import re
 from openai import OpenAI
 
 class InstrumentSearcher:
@@ -10,6 +12,19 @@ class InstrumentSearcher:
         if header_row is not None:
             read_kwargs['header'] = header_row
         self.df = pd.read_excel(excel_file_path, **read_kwargs).fillna('')
+        # Ensure we have a combined_text column for local keyword scoring. If the
+        # spreadsheet already provides one, keep it; otherwise construct it from
+        # commonly useful fields so local fallback works even without precomputed text.
+        if 'combined_text' not in self.df.columns:
+            cols_to_combine = []
+            for c in ('Measurement Instrument', 'Acronym', 'Purpose', 'Target Group(s)', 'Outcome Domain'):
+                if c in self.df.columns:
+                    cols_to_combine.append(self.df[c].astype(str))
+            if cols_to_combine:
+                self.df['combined_text'] = (pd.Series([''] * len(self.df)) + ' ' +
+                                            pd.concat(cols_to_combine, axis=1).apply(lambda row: ' '.join([str(x) for x in row if x]), axis=1))
+            else:
+                self.df['combined_text'] = ''
         self._client = None
     
     def _get_client(self):
@@ -31,32 +46,91 @@ User query: "{query}"
 
 Return ONLY the names of the most relevant instruments (max {max_results}) that match the query, one per line. No explanations, just the instrument names:"""
 
-        client = self._get_client()
         response = None
+        # Only attempt an HF call if HF_TOKEN is available; otherwise skip to
+        # local fallback scoring. This avoids crashing when the environment
+        # doesn't provide a token.
         try:
-            response = client.chat.completions.create(
-                model="moonshotai/Kimi-K2-Instruct-0905",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=300,
-                temperature=0.1
-            )
-        except Exception as e:
-            print(e)
+            client = self._get_client()
+        except RuntimeError:
+            if os.getenv('DEBUG_HF') == '1':
+                print('\n[DEBUG_HF] HF_TOKEN not set; skipping HF call and using local fallback')
+            client = None
+
+        if client is not None:
+            try:
+                response = client.chat.completions.create(
+                    model="moonshotai/Kimi-K2-Instruct-0905",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=300,
+                    temperature=0.1
+                )
+            except Exception:
+                # Print error when debugging is enabled so the user can see HF call issues
+                if os.getenv('DEBUG_HF') == '1':
+                    print('\n[DEBUG_HF] Exception while calling HF/OpenAI router:')
+                    import traceback
+                    traceback.print_exc()
+                response = None
 
         results = []
         suggested_names = []
         if response is not None:
             try:
                 llm_output = response.choices[0].message.content.strip()
-                suggested_names = [line.strip(' -') for line in llm_output.split('\n') if line.strip()]
+                # Optional debug: print raw LLM output when DEBUG_HF=1
+                if os.getenv('DEBUG_HF') == '1':
+                    print('\n[DEBUG_HF] raw LLM output:')
+                    print(llm_output)
+
+                # Try JSON parse first
+                import json
+                try:
+                    parsed = json.loads(llm_output)
+                    if isinstance(parsed, list):
+                        suggested_names = [str(x).strip() for x in parsed if x]
+                except Exception:
+                    # Fallback to line-splitting
+                    suggested_names = [line.strip(' -"') for line in llm_output.split('\n') if line.strip()]
+                if os.getenv('DEBUG_HF') == '1':
+                    print('\n[DEBUG_HF] parsed suggested_names:', suggested_names)
             except Exception:
                 suggested_names = []
 
         if suggested_names:
+            # Try to map suggested names to actual spreadsheet rows. We prefer
+            # case-insensitive substring matches, but as a fallback use
+            # fuzzy matching (difflib) to handle small name variations from the LLM.
             for name in suggested_names[:max_results]:
-                match = self.df[
-                    self.df['Measurement Instrument'].str.contains(name, case=False, na=False)
-                ]
+                # direct substring match first
+                # Use literal substring matching to avoid regex pitfalls when
+                # instrument names contain special characters. pandas' str.contains
+                # supports regex=False for literal matching.
+                try:
+                    match = self.df[
+                        self.df['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)
+                    ]
+                except TypeError:
+                    # Older pandas versions may not accept regex kw; fallback to
+                    # escaping the pattern for regex matching.
+                    match = self.df[
+                        self.df['Measurement Instrument'].str.contains(re.escape(name), case=False, na=False)
+                    ]
+                # if not found, try fuzzy match against available instrument names
+                if match.empty:
+                    candidates = difflib.get_close_matches(name, instrument_names, n=1, cutoff=0.6)
+                    if candidates:
+                        cand = candidates[0]
+                        try:
+                            match = self.df[
+                                self.df['Measurement Instrument'].str.contains(cand, case=False, na=False, regex=False)
+                            ]
+                        except TypeError:
+                            match = self.df[
+                                self.df['Measurement Instrument'].str.contains(re.escape(cand), case=False, na=False)
+                            ]
+                        if os.getenv('DEBUG_HF') == '1':
+                            print(f"[DEBUG_HF] Fuzzy-matched '{name}' -> '{cand}'")
                 if not match.empty:
                     row = match.iloc[0]
                     results.append({'instrument': row, 'similarity_score': None})
@@ -67,7 +141,10 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
             return []
         scores = []
         for i, row in self.df.iterrows():
+            # Use combined_text if provided, otherwise join all string fields in the row
             text = str(row.get('combined_text', '')).lower()
+            if not text:
+                text = ' '.join([str(v) for v in row.values if isinstance(v, (str, int, float))]).lower()
             score = sum(1 for t in qtokens if t in text)
             if score > 0:
                 scores.append((score, i))

@@ -8,7 +8,12 @@ def main():
     parser.add_argument('excel_path', nargs='?', default='measurement_instruments.xlsx')
     args = parser.parse_args()
 
-    agent = MeasurementInstrumentAgent(args.excel_path)
+    # Use the specific sheet name that contains the instruments
+    try:
+        agent = MeasurementInstrumentAgent(args.excel_path, sheet_name='Measurement Instruments')
+    except Exception as e:
+        print(f"Error initializing agent: {e}")
+        return
     
     print("Type your search query or 'manual' for advanced search. 'quit' to exit.")
     
@@ -24,7 +29,23 @@ def main():
             print("\n" + agent.format_response(results))
         else:
             results = agent.search_instruments(query)
-            print(agent.format_response(results))
+            if isinstance(results, dict) and 'recommendations' in results:
+                print(agent.format_response(results))
+            else:
+                recs = []
+                for r in results:
+                    ins = r.get('instrument') if isinstance(r, dict) else None
+                    if ins is None:
+                        continue
+                    recs.append({
+                        'name': ins.get('Measurement Instrument', ''),
+                        'acronym': ins.get('Acronym', ''),
+                        'purpose': ins.get('Purpose', ''),
+                        'target_group': ins.get('Target Group(s)', ''),
+                        'domain': ins.get('Outcome Domain', ''),
+                        'similarity_score': r.get('similarity_score')
+                    })
+                print(agent.format_results(recs))
 
 
 if __name__ == '__main__':

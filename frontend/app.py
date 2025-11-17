@@ -97,8 +97,14 @@ def call_huggingface_chat(prompt, df):
             names = [line.strip(' -') for line in llm_text.split('\n') if line.strip()]
 
         matched = []
+        import re
         for nm in names:
-            match = df[df['Measurement Instrument'].str.contains(nm, case=False, na=False)]
+            # Use literal substring match to avoid regex issues when names
+            # include parentheses or other metacharacters.
+            try:
+                match = df[df['Measurement Instrument'].str.contains(nm, case=False, na=False, regex=False)]
+            except TypeError:
+                match = df[df['Measurement Instrument'].str.contains(re.escape(nm), case=False, na=False)]
             if not match.empty:
                 matched.append(match.iloc[0])
 

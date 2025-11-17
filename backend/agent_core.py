@@ -1,6 +1,6 @@
 import pandas as pd
 import os
-from openai import OpenAI
+import numpy as np
 
 class MeasurementInstrumentAgent:
     def __init__(self, excel_file_path, sheet_name=None, header_row=None):
@@ -10,6 +10,16 @@ class MeasurementInstrumentAgent:
         if header_row is not None:
             read_kwargs['header'] = header_row
         self.df = pd.read_excel(excel_file_path, **read_kwargs).fillna('')
+        # Prepare a combined text field used for embedding-based matching
+        text_cols = ['Measurement Instrument', 'Acronym', 'Purpose', 'Target Group(s)', 'Outcome Domain']
+        combined = []
+        for _, row in self.df.iterrows():
+            parts = [str(row.get(c, '')) for c in text_cols if row.get(c, '')]
+            combined.append(' \n '.join([p for p in parts if p]))
+        self.df['combined_text'] = combined
+
+        self._embeddings = None
+        self._embed_model = None
         self._client = None
     
     def _get_client(self):
@@ -19,61 +29,57 @@ class MeasurementInstrumentAgent:
                 raise RuntimeError('HF_TOKEN not set in environment; cannot call Hugging Face APIs')
             self._client = OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf)
         return self._client
+
+    def _ensure_embeddings(self, model_name='sentence-transformers/all-MiniLM-L6-v2'):
+        """Lazily load the embedding model and compute embeddings for the dataset."""
+        if self._embeddings is not None:
+            return
+        try:
+            from sentence_transformers import SentenceTransformer
+        except Exception as e:
+            raise RuntimeError("sentence-transformers is required for embeddings-based search. Install with 'pip install sentence-transformers'") from e
+
+        if self._embed_model is None:
+            self._embed_model = SentenceTransformer(model_name)
+
+        texts = self.df['combined_text'].astype(str).tolist()
+        embs = self._embed_model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+        # Normalize for cosine similarity
+        norms = np.linalg.norm(embs, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        embs = embs / norms
+        self._embeddings = embs
     
     def search(self, query, max_results=5):
-        """Search for instruments matching the query"""
-        instrument_names = self.df['Measurement Instrument'].tolist()
-        
-        prompt = f"""You are a professional assistant to help users find suitable measurement instruments. Your total max output is 300 words at anytime. Available measurement instruments:
-{chr(10).join([f'- {name}' for name in instrument_names if name])}
+        """Search for instruments matching the natural-language query using embeddings.
 
-User query: "{query}"
+        This method uses a small sentence-transformers model to compute a
+        semantic embedding for the query and returns the top matching rows from
+        the Excel file. Results are guaranteed to be rows from the spreadsheet.
+        """
+        if not query or not str(query).strip():
+            return []
 
-Return ONLY the names of the most relevant instruments (max {max_results}) that match the query, one per line. Output the information that can be found in the xlsx file only. No explanations, just the instrument names:"""
+        # Ensure dataset embeddings exist
+        self._ensure_embeddings()
 
-        client = self._get_client()
-        response = None
-        try:
-            response = client.chat.completions.create(
-                model="moonshotai/Kimi-K2-Instruct-0905",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=300,
-                temperature=0.1
-            )
-        except Exception as e:
-            print(e)
+        # Compute embedding for the query
+        qvec = self._embed_model.encode([str(query)], convert_to_numpy=True)
+        qnorm = np.linalg.norm(qvec)
+        if qnorm == 0:
+            qnorm = 1.0
+        qvec = qvec / qnorm
+
+        # Cosine similarities
+        sims = (self._embeddings @ qvec[0])
+        # Get top indices
+        top_idx = np.argsort(-sims)[:max_results]
 
         results = []
-        suggested_names = []
-        if response is not None:
-            try:
-                llm_output = response.choices[0].message.content.strip()
-                suggested_names = [line.strip(' -') for line in llm_output.split('\n') if line.strip()]
-            except Exception:
-                suggested_names = []
-
-        if suggested_names:
-            for name in suggested_names[:max_results]:
-                match = self.df[
-                    self.df['Measurement Instrument'].str.contains(name, case=False, na=False)
-                ]
-                if not match.empty:
-                    row = match.iloc[0]
-                    results.append({'instrument': row, 'similarity_score': None})
-            return results
-
-        qtokens = [t.strip().lower() for t in str(query).split() if t.strip()]
-        if not qtokens:
-            return []
-        scores = []
-        for i, row in self.df.iterrows():
-            text = str(row.get('combined_text', '')).lower()
-            score = sum(1 for t in qtokens if t in text)
-            if score > 0:
-                scores.append((score, i))
-        scores.sort(reverse=True)
-        for score, idx in scores[:max_results]:
-            results.append({'instrument': self.df.iloc[idx], 'similarity_score': float(score)})
+        for idx in top_idx:
+            score = float(sims[idx])
+            row = self.df.iloc[int(idx)]
+            results.append({'instrument': row, 'similarity_score': score})
         return results
 
     def search_instruments(self, query, top_k=3):

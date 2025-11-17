@@ -277,6 +277,12 @@ def render_chat_page(agent, df):
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
+    # If there are no messages yet, add a spacer so the chat input stays
+    # visually at the bottom of the page on first load. When messages exist
+    # the spacer is not shown and history displays normally.
+    if not st.session_state.messages:
+        st.markdown("<div style='height:60vh'></div>", unsafe_allow_html=True)
+
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             if message.get('role') == 'assistant' and message.get('matched'):

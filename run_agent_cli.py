@@ -8,7 +8,6 @@ def main():
     parser.add_argument('excel_path', nargs='?', default='measurement_instruments.xlsx')
     args = parser.parse_args()
 
-    # Use the specific sheet name that contains the instruments
     try:
         agent = MeasurementInstrumentAgent(args.excel_path, sheet_name='Measurement Instruments')
     except Exception as e:

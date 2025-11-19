@@ -6,32 +6,20 @@ from openai import OpenAI
 
 
 def _validated_in_hk_text(x: object) -> bool:
-    """Heuristic: return True when the text indicates validation in Hong Kong.
-
-    The spreadsheet entries are heterogeneous ("Yes. Refer to...", long
-    sentences, "Developed and validated in HK."). This tries to detect
-    positive signals and avoids false positives when the text explicitly
-    says "Not validated in Hong Kong".
-    """
     s = str(x or '').lower()
     s = s.strip()
     if not s or s in ('-', 'na', 'n/a'):
         return False
-    # Negative patterns first
     if 'not validated' in s or 'not validated in hong' in s:
         return False
-    # phrases like 'not in Hong Kong' or 'not ... hong' should be negative
     if 'not in hong' in s or 'not in hong kong' in s or re.search(r'not .*hong', s):
         return False
-    # explicit 'no' as whole word is negative
     if re.search(r"\bno\b", s):
         return False
-    # Positive when explicit yes or mentions HK/Hong Kong together with 'valid'
     if s.startswith('yes'):
         return True
     if ('hong' in s or 'hk' in s or 'hong kong' in s) and ('valid' in s or 'develop' in s or 'refer' in s):
         return True
-    # fallback: any explicit 'validated' mention counts if not negated
     if 'validated' in s and 'hong' in s:
         return True
     return False
@@ -44,9 +32,6 @@ class InstrumentSearcher:
         if header_row is not None:
             read_kwargs['header'] = header_row
         self.df = pd.read_excel(excel_file_path, **read_kwargs).fillna('')
-        # Ensure we have a combined_text column for local keyword scoring. If the
-        # spreadsheet already provides one, keep it; otherwise construct it from
-        # commonly useful fields so local fallback works even without precomputed text.
         if 'combined_text' not in self.df.columns:
             cols_to_combine = []
             for c in ('Measurement Instrument', 'Acronym', 'Purpose', 'Target Group(s)', 'Outcome Domain'):
@@ -62,7 +47,6 @@ class InstrumentSearcher:
     def _get_client(self):
         if self._client is None:
             hf = os.environ.get('HF_TOKEN')
-            # If the token is stored with surrounding quotes in .env, strip them.
             if isinstance(hf, str):
                 hf = hf.strip().strip('\"\'')
             if not hf:
@@ -71,9 +55,6 @@ class InstrumentSearcher:
         return self._client
     
     def search(self, query, max_results=5, df_override=None):
-        """Search for instruments matching the query. Optional df_override can
-        be provided to restrict the search to a subset of the dataset (e.g.
-        programme-level instruments only)."""
         df_local = df_override if df_override is not None else self.df
         instrument_names = df_local['Measurement Instrument'].tolist()
         
@@ -85,9 +66,6 @@ User query: "{query}"
 Return ONLY the names of the most relevant instruments (max {max_results}) that match the query, one per line. No explanations, just the instrument names:"""
 
         response = None
-        # Only attempt an HF call if HF_TOKEN is available; otherwise skip to
-        # local fallback scoring. This avoids crashing when the environment
-        # doesn't provide a token.
         try:
             client = self._get_client()
         except RuntimeError:
@@ -104,7 +82,6 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                     temperature=0.1
                 )
             except Exception:
-                # Print error when debugging is enabled so the user can see HF call issues
                 if os.getenv('DEBUG_HF') == '1':
                     print('\n[DEBUG_HF] Exception while calling HF/OpenAI router:')
                     import traceback
@@ -116,19 +93,16 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
         if response is not None:
             try:
                 llm_output = response.choices[0].message.content.strip()
-                # Optional debug: print raw LLM output when DEBUG_HF=1
                 if os.getenv('DEBUG_HF') == '1':
                     print('\n[DEBUG_HF] raw LLM output:')
                     print(llm_output)
 
-                # Try JSON parse first
                 import json
                 try:
                     parsed = json.loads(llm_output)
                     if isinstance(parsed, list):
                         suggested_names = [str(x).strip() for x in parsed if x]
                 except Exception:
-                    # Fallback to line-splitting
                     suggested_names = [line.strip(' -"') for line in llm_output.split('\n') if line.strip()]
                 if os.getenv('DEBUG_HF') == '1':
                     print('\n[DEBUG_HF] parsed suggested_names:', suggested_names)
@@ -136,25 +110,15 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 suggested_names = []
 
         if suggested_names:
-            # Try to map suggested names to actual spreadsheet rows. We prefer
-            # case-insensitive substring matches, but as a fallback use
-            # fuzzy matching (difflib) to handle small name variations from the LLM.
-            for name in suggested_names[:max_results]:
-                # direct substring match first
-                # Use literal substring matching to avoid regex pitfalls when
-                # instrument names contain special characters. pandas' str.contains
-                # supports regex=False for literal matching.
+           for name in suggested_names[:max_results]:
                 try:
                     match = df_local[
                         df_local['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)
                     ]
                 except TypeError:
-                    # Older pandas versions may not accept regex kw; fallback to
-                    # escaping the pattern for regex matching.
                     match = df_local[
                         df_local['Measurement Instrument'].str.contains(re.escape(name), case=False, na=False)
                     ]
-                # if not found, try fuzzy match against available instrument names
                 if match.empty:
                     candidates = difflib.get_close_matches(name, instrument_names, n=1, cutoff=0.6)
                     if candidates:
@@ -177,11 +141,9 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
         qtokens = [t.strip().lower() for t in str(query).split() if t.strip()]
         if not qtokens:
             return []
-        # Reset index so we can use positional iloc safely on the filtered df
         df_for_scoring = df_local.reset_index(drop=True)
         scores = []
         for i, row in df_for_scoring.iterrows():
-            # Use combined_text if provided, otherwise join all string fields in the row
             text = str(row.get('combined_text', '')).lower()
             if not text:
                 text = ' '.join([str(v) for v in row.values if isinstance(v, (str, int, float))]).lower()
@@ -197,8 +159,6 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
         return self.search(query, max_results=top_k, df_override=df_override)
 
     def manual_search(self, beneficiaries=None, measure=None, validated='both', prog_level='both', top_k=10):
-        # Build a natural-language query including the provided filters and
-        # let the Hugging Face LLM pick the best instruments from the dataset.
         parts = []
         if measure:
             parts.append(f"Measure: {measure}")
@@ -214,9 +174,6 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
 
         q = '; '.join(parts).strip() or (measure or '')
 
-        # Determine whether we should restrict the dataset to programme-level
-        # instruments or HK-validated instruments before delegating selection to
-        # the LLM.
         df_override = None
         try:
             df_override = self.df
@@ -236,8 +193,6 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
         except Exception:
             df_override = None
 
-        # Delegate selection to the LLM (search() uses HF-first). Pass df_override
-        # so the LLM is only given instruments from the requested subset.
         results = self.search(q, max_results=top_k, df_override=df_override)
 
         formatted = {'query': q, 'recommendations': []}
@@ -255,9 +210,6 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
         return formatted
 
     def format_response(self, results):
-        """Compatibility wrapper: accept either a list of recommendations or the
-        dict returned by `manual_search` and return a human-friendly string.
-        """
         if isinstance(results, dict) and 'recommendations' in results:
             recs = results.get('recommendations', [])
             query = results.get('query')
@@ -268,7 +220,6 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
         return self.format_results(results)
 
     def format_results(self, results):
-        """Format search results nicely"""
         if not results:
             return "No matching instruments found."
         

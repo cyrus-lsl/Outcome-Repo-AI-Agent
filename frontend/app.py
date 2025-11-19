@@ -206,10 +206,6 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
     if not matched:
         return {'text': 'No matching instruments found in the database.', 'matched': [], 'unknown': unknown}
 
-    # Post-filter by simple token overlap to remove clearly irrelevant picks.
-    # We do NOT special-case 'validated in Hong Kong' here; natural
-    # language in the prompt will be used by the LLM and then results are
-    # heuristically checked for token overlap.
     def _lower(x):
         try:
             return str(x).lower()
@@ -227,11 +223,8 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
 
     if not filtered:
         filtered = matched
-        filter_note = ' (note: heuristics did not find stricter matches; showing best matches)'
+        filter_note = ' (did not find stricter matches; showing best matches)'
 
-    # If user explicitly requested HK-validated instruments, enforce that the
-    # final results are validated in HK using the conservative heuristic. If
-    # none of the filtered results are validated, return a clear message.
     if want_validated_hk:
         validated_filtered = [ins for ins in filtered if _validated_in_hk_text(ins.get('validated', ''))]
         if validated_filtered:
@@ -240,7 +233,6 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
         else:
             return {'text': 'No instruments validated in Hong Kong found matching the query.', 'matched': [], 'unknown': unknown}
 
-    # Build markdown summary
     out_parts = []
     for ins in filtered:
         part = f"**{ins['name']}" + (f" ({ins['acronym']})" if ins['acronym'] else '') + f"** — {ins['domain']}\n\n"
@@ -274,7 +266,6 @@ def render_chat_page(agent, df):
         "- Manual search with filters on the Manual Search page"
     )
 
-    # Chat-level toggles placed directly under the "What I can do" section
     if 'chat_validated_only' not in st.session_state:
         st.session_state.chat_validated_only = False
     if 'chat_prog_only' not in st.session_state:
@@ -288,9 +279,6 @@ def render_chat_page(agent, df):
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # If there are no messages yet, add a spacer so the chat input stays
-    # visually at the bottom of the page on first load. When messages exist
-    # the spacer is not shown and history displays normally.
     if not st.session_state.messages:
         st.markdown("<div style='height:60vh'></div>", unsafe_allow_html=True)
 
@@ -319,13 +307,9 @@ def render_chat_page(agent, df):
             else:
                 st.markdown(message.get('content', ''))
 
-    # Render chat messages above, then render persistent controls and the
-    # chat input at the bottom inside a reserved placeholder so the toggles
-    # appear just above the enquiry input and remain in-place across reruns.
     bottom_area = st.empty()
     with bottom_area.container():
         if prompt := st.chat_input("Ask about measurement instruments..."):
-            # Render the user's message immediately so it's visible in the chat UI
             with st.chat_message("user"):
                 st.markdown(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
@@ -339,7 +323,6 @@ def render_chat_page(agent, df):
                         max_results=8,
                     )
 
-                # Build assistant message object
                 if isinstance(response, dict) and 'matched' in response:
                     assistant_msg = {
                         'role': 'assistant',
@@ -347,7 +330,6 @@ def render_chat_page(agent, df):
                         'matched': response.get('matched', []),
                         'unknown': response.get('unknown', [])
                     }
-                    # render assistant message now
                     if not assistant_msg['matched']:
                         st.markdown(assistant_msg['content'])
                     else:
@@ -370,7 +352,6 @@ def render_chat_page(agent, df):
                                     st.markdown(f"[Download (Eng)]({ins.get('download_eng')})")
                                 if ins.get('sample_q1'):
                                     st.markdown(f"**Sample item:** {ins.get('sample_q1')}  ")
-                    # store assistant message in history
                     st.session_state.messages.append(assistant_msg)
                 else:
                     assistant_msg = {
@@ -380,22 +361,18 @@ def render_chat_page(agent, df):
                         'unknown': None
                     }
                     st.markdown(assistant_msg['content'])
-                    # store assistant message in history
                     st.session_state.messages.append(assistant_msg)
         
 
     if st.button("Clear Chat History"):
         st.session_state.messages = []
         try:
-            # Some Streamlit deployments may not expose experimental_rerun;
-            # fail-safe to avoid crashing the app.
             st.experimental_rerun()
         except Exception:
             pass
 
 
 def render_manual_search_page(agent, df):
-    """Render the manual search interface"""
     st.subheader("🧭 Manual Search")
 
     selected_filters = st.multiselect(
@@ -424,14 +401,12 @@ def render_manual_search_page(agent, df):
     if "Program-level metrics" in selected_filters:
         prog_level = st.selectbox("Program-level metrics", ["both", "yes", "no"])
 
-    # Bottom-of-page toggles for Manual Search (kept near the Search button)
     mcol1, mcol2 = st.columns([1, 1])
     manual_validated_only = mcol1.checkbox("Require HK-validated only", value=False)
     manual_prog_only = mcol2.checkbox("Programme-level only", value=False)
 
     if st.button("Search"):
         try:
-            # If the manual-only toggles are set, override the selectbox values
             validated_param = 'yes' if manual_validated_only else validated
             prog_level_param = 'yes' if manual_prog_only else prog_level
 
@@ -457,7 +432,6 @@ def render_manual_search_page(agent, df):
 
 
 def main():
-    # Page configuration
     st.set_page_config(
         page_title="Measurement Instrument Assistant",
         page_icon="📊",
@@ -467,21 +441,18 @@ def main():
     st.title("📊 Measurement Instrument Assistant")
     st.markdown("**Powered by Hugging Face AI**")
     
-    # Load environment and initialize agent
     load_environment()
     agent = initialize_agent()
     
     if not agent:
         return
     
-    # Load data for context
     try:
         df = pd.read_excel("measurement_instruments.xlsx", sheet_name="Measurement Instruments")
     except Exception as e:
         st.error(f"Error loading data: {e}")
         return
 
-    # Page navigation
     page = st.sidebar.radio("Navigation", ["Chat", "Manual Search"])
     
     if page == "Chat":

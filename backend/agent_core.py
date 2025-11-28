@@ -136,7 +136,7 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 if not match.empty:
                     row = match.iloc[0]
                     results.append({'instrument': row, 'similarity_score': None})
-            return results
+        return results
 
         qtokens = [t.strip().lower() for t in str(query).split() if t.strip()]
         if not qtokens:

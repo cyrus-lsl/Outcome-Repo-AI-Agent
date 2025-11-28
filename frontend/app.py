@@ -69,7 +69,7 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
     if isinstance(hf, str):
         hf = hf.strip().strip('"\'')
     if not hf:
-        return "❌ HF_TOKEN not set in environment"
+        return "HF_TOKEN not set in environment"
 
     client = OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf)
 
@@ -153,7 +153,7 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
             temperature=0.0,
         )
     except Exception as e:
-        return f"❌ Error calling Hugging Face AI: {e}"
+        return f"Error calling Hugging Face AI: {e}"
 
     llm_text = completion.choices[0].message.content
 
@@ -258,6 +258,7 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
 
 def render_chat_page(agent, df):
     """Render the chat interface"""
+    
     st.subheader("💬 Chat with AI Assistant")
     st.markdown("### What I can do")
     st.markdown(
@@ -266,110 +267,59 @@ def render_chat_page(agent, df):
         "- Manual search with filters on the Manual Search page"
     )
 
+    # Initialize checkbox state
     if 'chat_validated_only' not in st.session_state:
         st.session_state.chat_validated_only = False
     if 'chat_prog_only' not in st.session_state:
         st.session_state.chat_prog_only = False
-    c1, c2 = st.columns([1, 1])
-    with c1:
+
+    # Fixed controls at bottom, above chat input
+    # These will be placed in Streamlit's bottom container automatically
+    filter_col1, filter_col2 = st.columns([1, 1])
+    with filter_col1:
         st.session_state.chat_validated_only = st.checkbox("Require HK-validated only", value=st.session_state.chat_validated_only)
-    with c2:
+    with filter_col2:
         st.session_state.chat_prog_only = st.checkbox("Programme-level only", value=st.session_state.chat_prog_only)
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    # Chat input - always at bottom (most bottom)
+    if prompt := st.chat_input("Ask about measurement instruments..."):
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("🤔 Thinking..."):
+                response = call_huggingface_chat(
+                    prompt,
+                    df,
+                    validated_only=st.session_state.chat_validated_only,
+                    prog_only=st.session_state.chat_prog_only,
+                    max_results=8,
+                )
 
-    if not st.session_state.messages:
-        st.markdown("<div style='height:60vh'></div>", unsafe_allow_html=True)
-
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            if message.get('role') == 'assistant' and message.get('matched'):
-                for ins in message.get('matched', []):
-                    with st.expander(ins.get('name', '') + (f" ({ins.get('acronym')})" if ins.get('acronym') else '')):
-                        st.markdown(f"**Domain:** {ins.get('domain','')}  ")
-                        st.markdown(f"**Purpose:** {ins.get('purpose','')}  ")
-                        st.markdown(f"**Target:** {ins.get('target','')}  ")
-                        if ins.get('no_of_items'):
-                            st.markdown(f"**Items:** {ins.get('no_of_items')}  ")
-                        if ins.get('scale'):
-                            st.markdown(f"**Scale:** {ins.get('scale')}  ")
-                        if ins.get('scoring'):
-                            st.markdown(f"**Scoring:** {ins.get('scoring')}  ")
-                        if ins.get('validated'):
-                            st.markdown(f"**Validated in HK:** {ins.get('validated')}  ")
-                        if ins.get('programme_level'):
-                            st.markdown(f"**Programme-level metric?:** {ins.get('programme_level')}  ")
-                        if ins.get('download_eng'):
-                            st.markdown(f"[Download (Eng)]({ins.get('download_eng')})")
-                        if ins.get('sample_q1'):
-                            st.markdown(f"**Sample item:** {ins.get('sample_q1')}  ")
-            else:
-                st.markdown(message.get('content', ''))
-
-    bottom_area = st.empty()
-    with bottom_area.container():
-        if prompt := st.chat_input("Ask about measurement instruments..."):
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("assistant"):
-                with st.spinner("🤔 Thinking..."):
-                    response = call_huggingface_chat(
-                        prompt,
-                        df,
-                        validated_only=st.session_state.chat_validated_only,
-                        prog_only=st.session_state.chat_prog_only,
-                        max_results=8,
-                    )
-
-                if isinstance(response, dict) and 'matched' in response:
-                    assistant_msg = {
-                        'role': 'assistant',
-                        'content': response.get('text', 'No matching instruments found in the database.'),
-                        'matched': response.get('matched', []),
-                        'unknown': response.get('unknown', [])
-                    }
-                    if not assistant_msg['matched']:
-                        st.markdown(assistant_msg['content'])
-                    else:
-                        for ins in assistant_msg['matched']:
-                            with st.expander(ins.get('name', '') + (f" ({ins.get('acronym')})" if ins.get('acronym') else '')):
-                                st.markdown(f"**Domain:** {ins.get('domain','')}  ")
-                                st.markdown(f"**Purpose:** {ins.get('purpose','')}  ")
-                                st.markdown(f"**Target:** {ins.get('target','')}  ")
-                                if ins.get('no_of_items'):
-                                    st.markdown(f"**Items:** {ins.get('no_of_items')}  ")
-                                if ins.get('scale'):
-                                    st.markdown(f"**Scale:** {ins.get('scale')}  ")
-                                if ins.get('scoring'):
-                                    st.markdown(f"**Scoring:** {ins.get('scoring')}  ")
-                                if ins.get('validated'):
-                                    st.markdown(f"**Validated in HK:** {ins.get('validated')}  ")
-                                if ins.get('programme_level'):
-                                    st.markdown(f"**Programme-level metric?:** {ins.get('programme_level')}  ")
-                                if ins.get('download_eng'):
-                                    st.markdown(f"[Download (Eng)]({ins.get('download_eng')})")
-                                if ins.get('sample_q1'):
-                                    st.markdown(f"**Sample item:** {ins.get('sample_q1')}  ")
-                    st.session_state.messages.append(assistant_msg)
+            if isinstance(response, dict) and 'matched' in response:
+                if not response.get('matched'):
+                    st.markdown(response.get('text', 'No matching instruments found in the database.'))
                 else:
-                    assistant_msg = {
-                        'role': 'assistant',
-                        'content': response if isinstance(response, str) else str(response),
-                        'matched': None,
-                        'unknown': None
-                    }
-                    st.markdown(assistant_msg['content'])
-                    st.session_state.messages.append(assistant_msg)
-        
-
-    if st.button("Clear Chat History"):
-        st.session_state.messages = []
-        try:
-            st.experimental_rerun()
-        except Exception:
-            pass
+                    for ins in response.get('matched', []):
+                        with st.expander(ins.get('name', '') + (f" ({ins.get('acronym')})" if ins.get('acronym') else '')):
+                            st.markdown(f"**Domain:** {ins.get('domain','')}  ")
+                            st.markdown(f"**Purpose:** {ins.get('purpose','')}  ")
+                            st.markdown(f"**Target:** {ins.get('target','')}  ")
+                            if ins.get('no_of_items'):
+                                st.markdown(f"**Items:** {ins.get('no_of_items')}  ")
+                            if ins.get('scale'):
+                                st.markdown(f"**Scale:** {ins.get('scale')}  ")
+                            if ins.get('scoring'):
+                                st.markdown(f"**Scoring:** {ins.get('scoring')}  ")
+                            if ins.get('validated'):
+                                st.markdown(f"**Validated in HK:** {ins.get('validated')}  ")
+                            if ins.get('programme_level'):
+                                st.markdown(f"**Programme-level metric?:** {ins.get('programme_level')}  ")
+                            if ins.get('download_eng'):
+                                st.markdown(f"[Download (Eng)]({ins.get('download_eng')})")
+                            if ins.get('sample_q1'):
+                                st.markdown(f"**Sample item:** {ins.get('sample_q1')}  ")
+            else:
+                st.markdown(response if isinstance(response, str) else str(response))
 
 
 def render_manual_search_page(agent, df):
@@ -453,7 +403,7 @@ def main():
         st.error(f"Error loading data: {e}")
         return
 
-    page = st.sidebar.radio("Navigation", ["Chat", "Manual Search"])
+    page = st.sidebar.radio("Navigation", ["Chat", "Manual Search"], key="nav_radio")
     
     if page == "Chat":
         render_chat_page(agent, df)

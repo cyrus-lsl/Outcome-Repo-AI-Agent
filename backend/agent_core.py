@@ -110,7 +110,7 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 suggested_names = []
 
         if suggested_names:
-           for name in suggested_names[:max_results]:
+            for name in suggested_names[:max_results]:
                 try:
                     match = df_local[
                         df_local['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)

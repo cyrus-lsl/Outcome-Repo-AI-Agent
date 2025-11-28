@@ -74,7 +74,18 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
     client = OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf)
 
     # Detect whether the user explicitly asked for instruments validated in Hong Kong
-    prompt_l = str(prompt or '').lower()
+    prompt_l = str(prompt or '').lower().strip()
+    
+    # Check for non-substantive queries (greetings, empty, too short)
+    greeting_patterns = [r'^\s*(hi|hello|hey|greetings|good\s+(morning|afternoon|evening))\s*[!?.]*\s*$', r'^\s*[!?.]+\s*$']
+    is_greeting = any(re.match(pattern, prompt_l) for pattern in greeting_patterns)
+    
+    if is_greeting or len(prompt_l) < 3:
+        return {
+            'text': "Hello! I can help you find measurement instruments. Please describe what you're looking for, for example:\n- 'mental health assessment for elderly'\n- 'physical activity questionnaire'\n- 'quality of life scale'\n\nWhat would you like to search for?",
+            'matched': [],
+            'unknown': []
+        }
     want_validated_hk = False
     try:
         if re.search(r"validated.*hong|validated.*hk|validated in hong|validate.*hong|validate.*hk", prompt_l):
@@ -134,7 +145,9 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
     system_message = (
         "You are an assistant that selects only instrument NAMES from the provided DATABASE. "
         "You will be given a list of instruments with short metadata (Domain, Target groups, Programme-level flag). Do NOT invent any names. "
-        f"Return ONLY a valid JSON array (e.g. [\"Name A\", \"Name B\"]) containing up to {max_results} names that appear in the provided list."
+        "IMPORTANT: If the user query is a greeting (like 'hi', 'hello'), a non-substantive query, or too vague to match any instruments, return an EMPTY JSON array: []. "
+        "Only return instrument names when the query is a substantive search request about measurement instruments. "
+        f"Return ONLY a valid JSON array (e.g. [\"Name A\", \"Name B\"] or [] for non-substantive queries) containing up to {max_results} names that appear in the provided list."
     )
 
     user_message = (
@@ -142,7 +155,7 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
         f"USER QUERY: {prompt}\n\n"
         + ("NOTE: The user requested only instruments validated in Hong Kong.\n" if want_validated_hk else "")
         + ("NOTE: The user requested only programme-level instruments.\n" if prog_only else "")
-        + f"Choose up to {max_results} instruments from the provided list that best match the user query, considering Domain, Purpose and Target groups. Return a JSON array with instrument names only."
+        + f"If the query is a greeting or not substantive enough to match instruments, return []. Otherwise, choose up to {max_results} instruments from the provided list that best match the user query, considering Domain, Purpose and Target groups. Return a JSON array with instrument names only."
     )
 
     try:
@@ -204,7 +217,14 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
         print('[DEBUG_HF] Model returned names not in spreadsheet and were ignored:', unknown)
 
     if not matched:
-        return {'text': 'No matching instruments found in the database.', 'matched': [], 'unknown': unknown}
+        # Check if this was a greeting or non-substantive query
+        if is_greeting or len(prompt_l) < 3:
+            return {
+                'text': "Hello! I can help you find measurement instruments. Please describe what you're looking for, for example:\n- 'mental health assessment for elderly'\n- 'physical activity questionnaire'\n- 'quality of life scale'\n\nWhat would you like to search for?",
+                'matched': [],
+                'unknown': unknown
+            }
+        return {'text': 'No matching instruments found in the database. Please try a more specific query.', 'matched': [], 'unknown': unknown}
 
     def _lower(x):
         try:
@@ -212,10 +232,18 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
         except Exception:
             return ''
 
-    qtokens = [t for t in re.findall(r"\w+", _lower(prompt)) if len(t) > 2]
+    # Extract meaningful tokens (exclude common words and very short tokens)
+    common_words = {'the', 'and', 'or', 'for', 'with', 'from', 'that', 'this', 'what', 'which', 'are', 'can', 'how', 'when', 'where', 'who', 'why', 'will', 'would', 'should', 'could', 'may', 'might', 'must', 'have', 'has', 'had', 'was', 'were', 'been', 'being', 'do', 'does', 'did', 'get', 'got', 'give', 'take', 'make', 'see', 'know', 'think', 'want', 'need', 'use', 'find', 'search', 'look', 'show', 'tell', 'ask', 'help', 'about', 'measure', 'assessment', 'scale', 'questionnaire', 'test', 'tool', 'instrument'}
+    qtokens = [t for t in re.findall(r"\w+", _lower(prompt)) if len(t) > 2 and t not in common_words]
+    
+    # If no meaningful tokens after filtering, return no matches
+    if not qtokens:
+        return {'text': 'Please provide a more specific query. For example, try:\n- "mental health assessment"\n- "physical activity questionnaire"\n- "quality of life scale for elderly"\n\nWhat are you looking for?', 'matched': [], 'unknown': unknown}
+    
     filtered = []
     for ins in matched:
         hay = ' '.join([_lower(ins.get('name', '')), _lower(ins.get('domain', '')), _lower(ins.get('purpose', '')), _lower(ins.get('target', ''))])
+        # Require at least one meaningful token match
         if any(tok in hay for tok in qtokens):
             filtered.append(ins)
 

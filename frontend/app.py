@@ -848,7 +848,6 @@ def main():
         st.markdown('<p class="subtitle">AI-powered search for research measurement instruments</p>', unsafe_allow_html=True)
     with col2:
         st.markdown("<br>", unsafe_allow_html=True)
-        st.caption("Powered by Hugging Face AI")
     
     load_environment()
     

@@ -2,7 +2,17 @@ import pandas as pd
 import os
 import difflib
 import re
+import numpy as np
 from openai import OpenAI
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Lazy import for sentence-transformers (optional dependency)
+try:
+    from sentence_transformers import SentenceTransformer
+    SEMANTIC_SEARCH_AVAILABLE = True
+except ImportError:
+    SEMANTIC_SEARCH_AVAILABLE = False
+    SentenceTransformer = None
 
 
 def _validated_in_hk_text(x: object) -> bool:
@@ -25,7 +35,7 @@ def _validated_in_hk_text(x: object) -> bool:
     return False
 
 class InstrumentSearcher:
-    def __init__(self, excel_file_path, sheet_name=None, header_row=None):
+    def __init__(self, excel_file_path, sheet_name=None, header_row=None, use_semantic_search=True):
         read_kwargs = {}
         if sheet_name is not None:
             read_kwargs['sheet_name'] = sheet_name
@@ -43,6 +53,21 @@ class InstrumentSearcher:
             else:
                 self.df['combined_text'] = ''
         self._client = None
+        
+        # Initialize semantic search
+        self.use_semantic_search = use_semantic_search and SEMANTIC_SEARCH_AVAILABLE
+        self._embedding_model = None
+        self._instrument_embeddings = None
+        if self.use_semantic_search:
+            try:
+                # Use a lightweight, multilingual model that works well for search
+                self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                # Pre-compute embeddings for all instruments (lazy loading)
+                self._instrument_embeddings = None
+            except Exception as e:
+                if os.getenv('DEBUG_HF') == '1':
+                    print(f'[DEBUG] Failed to initialize semantic search: {e}')
+                self.use_semantic_search = False
     
     def _get_client(self):
         if self._client is None:
@@ -54,63 +79,152 @@ class InstrumentSearcher:
             self._client = OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf)
         return self._client
     
-    def search(self, query, max_results=5, df_override=None):
-        df_local = df_override if df_override is not None else self.df
-        instrument_names = df_local['Measurement Instrument'].tolist()
+    def _get_instrument_embeddings(self, df_local=None):
+        """Lazy load and cache instrument embeddings"""
+        df_to_use = df_local if df_local is not None else self.df
         
-        prompt = f"""You are a professional assistant to help users find suitable measurement instruments. Your total max output is 300 words at anytime. Available measurement instruments:
+        # Check if we need to recompute (different dataframe or not computed yet)
+        if self._instrument_embeddings is None or df_local is not None:
+            if not self.use_semantic_search or self._embedding_model is None:
+                return None
+            
+            # Build searchable text for each instrument
+            texts = []
+            for _, row in df_to_use.iterrows():
+                parts = []
+                if row.get('Measurement Instrument'):
+                    parts.append(str(row.get('Measurement Instrument')))
+                if row.get('Acronym'):
+                    parts.append(str(row.get('Acronym')))
+                if row.get('Purpose'):
+                    parts.append(str(row.get('Purpose')))
+                if row.get('Outcome Domain'):
+                    parts.append(str(row.get('Outcome Domain')))
+                if row.get('Target Group(s)'):
+                    parts.append(str(row.get('Target Group(s)')))
+                texts.append(' '.join(parts))
+            
+            # Compute embeddings
+            try:
+                self._instrument_embeddings = self._embedding_model.encode(texts, show_progress_bar=False)
+            except Exception as e:
+                if os.getenv('DEBUG_HF') == '1':
+                    print(f'[DEBUG] Failed to compute embeddings: {e}')
+                return None
+        
+        return self._instrument_embeddings
+    
+    def semantic_search(self, query, max_results=5, df_override=None, min_similarity=0.3):
+        """Perform semantic search using embeddings"""
+        if not self.use_semantic_search or self._embedding_model is None:
+            return []
+        
+        df_local = df_override if df_override is not None else self.df
+        embeddings = self._get_instrument_embeddings(df_local)
+        
+        if embeddings is None:
+            return []
+        
+        try:
+            # Encode query
+            query_embedding = self._embedding_model.encode([query], show_progress_bar=False)
+            
+            # Compute cosine similarity
+            similarities = cosine_similarity(query_embedding, embeddings)[0]
+            
+            # Get top results
+            top_indices = np.argsort(similarities)[::-1][:max_results]
+            
+            results = []
+            for idx in top_indices:
+                similarity = float(similarities[idx])
+                if similarity >= min_similarity:
+                    row = df_local.iloc[idx]
+                    results.append({
+                        'instrument': row,
+                        'similarity_score': similarity,
+                        'semantic_score': similarity
+                    })
+            
+            return results
+        except Exception as e:
+            if os.getenv('DEBUG_HF') == '1':
+                print(f'[DEBUG] Semantic search error: {e}')
+            return []
+    
+    def search(self, query, max_results=5, df_override=None, use_semantic=True):
+        """Hybrid search: semantic search + LLM fallback"""
+        df_local = df_override if df_override is not None else self.df
+        results = []
+        
+        # Try semantic search first if available
+        if use_semantic and self.use_semantic_search:
+            semantic_results = self.semantic_search(query, max_results=max_results, df_override=df_override)
+            if semantic_results:
+                # Use semantic results if we have good matches
+                results = semantic_results
+                if os.getenv('DEBUG_HF') == '1':
+                    print(f'[DEBUG] Semantic search found {len(results)} results')
+        
+        # If semantic search didn't return enough results, try LLM-based search
+        if len(results) < max_results:
+            instrument_names = df_local['Measurement Instrument'].tolist()
+            
+            prompt = f"""You are a professional assistant to help users find suitable measurement instruments. Your total max output is 300 words at anytime. Available measurement instruments:
 {chr(10).join([f'- {name}' for name in instrument_names if name])}
 
 User query: "{query}"
 
 Return ONLY the names of the most relevant instruments (max {max_results}) that match the query, one per line. No explanations, just the instrument names:"""
 
-        response = None
-        try:
-            client = self._get_client()
-        except RuntimeError:
-            if os.getenv('DEBUG_HF') == '1':
-                print('\n[DEBUG_HF] HF_TOKEN not set; skipping HF call and using local fallback')
-            client = None
-
-        if client is not None:
+            response = None
             try:
-                response = client.chat.completions.create(
-                    model="moonshotai/Kimi-K2-Instruct-0905",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=300,
-                    temperature=0.1
-                )
-            except Exception:
+                client = self._get_client()
+            except RuntimeError:
                 if os.getenv('DEBUG_HF') == '1':
-                    print('\n[DEBUG_HF] Exception while calling HF/OpenAI router:')
-                    import traceback
-                    traceback.print_exc()
-                response = None
+                    print('\n[DEBUG_HF] HF_TOKEN not set; skipping HF call and using local fallback')
+                client = None
 
-        results = []
-        suggested_names = []
-        if response is not None:
-            try:
-                llm_output = response.choices[0].message.content.strip()
-                if os.getenv('DEBUG_HF') == '1':
-                    print('\n[DEBUG_HF] raw LLM output:')
-                    print(llm_output)
-
-                import json
+            if client is not None:
                 try:
-                    parsed = json.loads(llm_output)
-                    if isinstance(parsed, list):
-                        suggested_names = [str(x).strip() for x in parsed if x]
+                    response = client.chat.completions.create(
+                        model="moonshotai/Kimi-K2-Instruct-0905",
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=300,
+                        temperature=0.1
+                    )
                 except Exception:
-                    suggested_names = [line.strip(' -"') for line in llm_output.split('\n') if line.strip()]
-                if os.getenv('DEBUG_HF') == '1':
-                    print('\n[DEBUG_HF] parsed suggested_names:', suggested_names)
-            except Exception:
-                suggested_names = []
+                    if os.getenv('DEBUG_HF') == '1':
+                        print('\n[DEBUG_HF] Exception while calling HF/OpenAI router:')
+                        import traceback
+                        traceback.print_exc()
+                    response = None
 
-        if suggested_names:
+            suggested_names = []
+            if response is not None:
+                try:
+                    llm_output = response.choices[0].message.content.strip()
+                    if os.getenv('DEBUG_HF') == '1':
+                        print('\n[DEBUG_HF] raw LLM output:')
+                        print(llm_output)
+
+                    import json
+                    try:
+                        parsed = json.loads(llm_output)
+                        if isinstance(parsed, list):
+                            suggested_names = [str(x).strip() for x in parsed if x]
+                    except Exception:
+                        suggested_names = [line.strip(' -"') for line in llm_output.split('\n') if line.strip()]
+                    if os.getenv('DEBUG_HF') == '1':
+                        print('\n[DEBUG_HF] parsed suggested_names:', suggested_names)
+                except Exception:
+                    suggested_names = []
+
+            # Add LLM results that aren't already in semantic results
+            existing_names = {r['instrument'].get('Measurement Instrument', '') for r in results}
             for name in suggested_names[:max_results]:
+                if name in existing_names:
+                    continue
                 try:
                     match = df_local[
                         df_local['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)
@@ -133,27 +247,33 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                             ]
                         if os.getenv('DEBUG_HF') == '1':
                             print(f"[DEBUG_HF] Fuzzy-matched '{name}' -> '{cand}'")
-                if not match.empty:
+                if not match.empty and len(results) < max_results:
                     row = match.iloc[0]
-                    results.append({'instrument': row, 'similarity_score': None})
-        return results
-
-        qtokens = [t.strip().lower() for t in str(query).split() if t.strip()]
-        if not qtokens:
-            return []
-        df_for_scoring = df_local.reset_index(drop=True)
-        scores = []
-        for i, row in df_for_scoring.iterrows():
-            text = str(row.get('combined_text', '')).lower()
-            if not text:
-                text = ' '.join([str(v) for v in row.values if isinstance(v, (str, int, float))]).lower()
-            score = sum(1 for t in qtokens if t in text)
-            if score > 0:
-                scores.append((score, i))
-        scores.sort(reverse=True)
-        for score, idx in scores[:max_results]:
-            results.append({'instrument': df_for_scoring.iloc[idx], 'similarity_score': float(score)})
-        return results
+                    results.append({'instrument': row, 'similarity_score': None, 'semantic_score': None})
+        
+        # Fallback to keyword-based search if still not enough results
+        if len(results) < max_results:
+            qtokens = [t.strip().lower() for t in str(query).split() if t.strip()]
+            if qtokens:
+                df_for_scoring = df_local.reset_index(drop=True)
+                scores = []
+                existing_indices = {df_local.index.get_loc(r['instrument'].name) for r in results if hasattr(r['instrument'], 'name')}
+                for i, row in df_for_scoring.iterrows():
+                    if i in existing_indices:
+                        continue
+                    text = str(row.get('combined_text', '')).lower()
+                    if not text:
+                        text = ' '.join([str(v) for v in row.values if isinstance(v, (str, int, float))]).lower()
+                    score = sum(1 for t in qtokens if t in text)
+                    if score > 0:
+                        scores.append((score, i))
+                scores.sort(reverse=True)
+                for score, idx in scores[:max_results - len(results)]:
+                    results.append({'instrument': df_for_scoring.iloc[idx], 'similarity_score': float(score), 'semantic_score': None})
+        
+        # Sort results by semantic score (if available) or similarity score
+        results.sort(key=lambda x: x.get('semantic_score', x.get('similarity_score', 0)), reverse=True)
+        return results[:max_results]
 
     def search_instruments(self, query, top_k=3, df_override=None):
         return self.search(query, max_results=top_k, df_override=df_override)

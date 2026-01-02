@@ -3,3 +3,6 @@ pandas
 python-dotenv
 openai
 openpyxl
+sentence-transformers
+numpy
+scikit-learn

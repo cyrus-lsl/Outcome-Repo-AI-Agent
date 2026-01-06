@@ -36,6 +36,16 @@ def load_environment():
         logger.warning("python-dotenv not available, using system environment variables")
 
 
+def resolve_excel_path(excel_path: str) -> str:
+    """Resolve Excel file path relative to project root"""
+    if os.path.isabs(excel_path):
+        # Already an absolute path
+        return excel_path
+    # Resolve relative to project root
+    resolved = ROOT / excel_path
+    return str(resolved.resolve())
+
+
 @st.cache_resource
 def initialize_agent():
     """Initialize the measurement instrument agent (cached)"""
@@ -46,6 +56,9 @@ def initialize_agent():
         else:
             excel_path = "measurement_instruments.xlsx"
             sheet_name = "Measurement Instruments"
+        
+        # Resolve path relative to project root
+        excel_path = resolve_excel_path(excel_path)
         
         from backend.agent_core import MeasurementInstrumentAgent
         agent = MeasurementInstrumentAgent(excel_path, sheet_name=sheet_name)
@@ -851,6 +864,12 @@ def main():
     
     load_environment()
     
+    # Resolve Excel file path before validation
+    if Config:
+        # Update Config with resolved path for validation
+        original_path = Config.EXCEL_FILE_PATH
+        Config.EXCEL_FILE_PATH = resolve_excel_path(Config.EXCEL_FILE_PATH)
+    
     # Validate configuration
     if Config:
         is_valid, errors = Config.validate()
@@ -875,6 +894,9 @@ def main():
         else:
             excel_path = "measurement_instruments.xlsx"
             sheet_name = "Measurement Instruments"
+        
+        # Resolve path relative to project root
+        excel_path = resolve_excel_path(excel_path)
         
         df = load_dataframe(excel_path, sheet_name)
     except FileNotFoundError:

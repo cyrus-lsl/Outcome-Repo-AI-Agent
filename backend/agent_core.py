@@ -220,37 +220,37 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
                 except Exception:
                     suggested_names = []
 
-            # Add LLM results that aren't already in semantic results
-            existing_names = {r['instrument'].get('Measurement Instrument', '') for r in results}
-            for name in suggested_names[:max_results]:
-                if name in existing_names:
-                    continue
-                try:
-                    match = df_local[
-                        df_local['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)
-                    ]
-                except TypeError:
-                    match = df_local[
-                        df_local['Measurement Instrument'].str.contains(re.escape(name), case=False, na=False)
-                    ]
-                if match.empty:
-                    candidates = difflib.get_close_matches(name, instrument_names, n=1, cutoff=0.6)
-                    if candidates:
-                        cand = candidates[0]
-                        try:
-                            match = df_local[
-                                df_local['Measurement Instrument'].str.contains(cand, case=False, na=False, regex=False)
-                            ]
-                        except TypeError:
-                            match = df_local[
-                                df_local['Measurement Instrument'].str.contains(re.escape(cand), case=False, na=False)
-                            ]
-                        if os.getenv('DEBUG_HF') == '1':
-                            print(f"[DEBUG_HF] Fuzzy-matched '{name}' -> '{cand}'")
-                if not match.empty and len(results) < max_results:
-                    row = match.iloc[0]
-                    results.append({'instrument': row, 'similarity_score': None, 'semantic_score': None})
-        
+                # Add LLM results that aren't already in semantic results
+                existing_names = {r['instrument'].get('Measurement Instrument', '') for r in results}
+                for name in suggested_names[:max_results]:
+                    if name in existing_names:
+                        continue
+                    try:
+                        match = df_local[
+                            df_local['Measurement Instrument'].str.contains(name, case=False, na=False, regex=False)
+                        ]
+                    except TypeError:
+                        match = df_local[
+                            df_local['Measurement Instrument'].str.contains(re.escape(name), case=False, na=False)
+                        ]
+                    if match.empty:
+                        candidates = difflib.get_close_matches(name, instrument_names, n=1, cutoff=0.6)
+                        if candidates:
+                            cand = candidates[0]
+                            try:
+                                match = df_local[
+                                    df_local['Measurement Instrument'].str.contains(cand, case=False, na=False, regex=False)
+                                ]
+                            except TypeError:
+                                match = df_local[
+                                    df_local['Measurement Instrument'].str.contains(re.escape(cand), case=False, na=False)
+                                ]
+                            if os.getenv('DEBUG_HF') == '1':
+                                print(f"[DEBUG_HF] Fuzzy-matched '{name}' -> '{cand}'")
+                    if not match.empty and len(results) < max_results:
+                        row = match.iloc[0]
+                        results.append({'instrument': row, 'similarity_score': None, 'semantic_score': None})
+
         # Fallback to keyword-based search if still not enough results
         if len(results) < max_results:
             qtokens = [t.strip().lower() for t in str(query).split() if t.strip()]

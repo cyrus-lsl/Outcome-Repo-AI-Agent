@@ -12,7 +12,6 @@ def main():
     )
     
     st.title("📊 Measurement Instrument Assistant")
-    st.markdown("**Powered by Hugging Face AI**")
     
     # Load environment variables from .env file
     load_dotenv()

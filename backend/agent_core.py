@@ -71,13 +71,45 @@ class InstrumentSearcher:
     
     def _get_client(self):
         if self._client is None:
-            hf = os.environ.get('HF_TOKEN')
-            if isinstance(hf, str):
-                hf = hf.strip().strip('\"\'')
-            if not hf:
-                raise RuntimeError('HF_TOKEN not set in environment; cannot call Hugging Face APIs')
-            self._client = OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf)
+            base_url, model_name, api_key = self._get_llm_config_with_fallback()
+            self._client = OpenAI(base_url=base_url, api_key=api_key)
+            self._model_name = model_name  # Store for later use
         return self._client
+    
+    def _get_llm_config_with_fallback(self):
+        """Get LLM configuration with automatic fallback from Ollama to configured cloud LLM"""
+        import requests
+        
+        # Primary: try local Ollama
+        ollama_base = "http://localhost:11434/v1"
+        ollama_model = "llama3.2:3b"  # Faster than llama3 (8B) on M1 Mac
+        
+        # Fallback: use configured LLM from environment
+        fallback_base = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
+        fallback_model = os.environ.get("LLM_MODEL", "llama3")
+        fallback_token = os.environ.get('LLM_API_KEY') or os.environ.get('HF_TOKEN') or "dummy-token"
+        if isinstance(fallback_token, str):
+            fallback_token = fallback_token.strip().strip('\"\'')
+        
+        # Check if Ollama is reachable
+        try:
+            response = requests.get("http://localhost:11434/api/tags", timeout=2)
+            if response.status_code == 200:
+                if os.getenv('DEBUG_HF') == '1':
+                    print('[DEBUG] Using local Ollama')
+                return ollama_base, ollama_model, "dummy-token"
+        except Exception:
+            pass
+        
+        # Fall back to configured LLM
+        if fallback_base != ollama_base or fallback_model != ollama_model:
+            if os.getenv('DEBUG_HF') == '1':
+                print(f'[DEBUG] Ollama not available, using configured LLM: {fallback_model}')
+            return fallback_base, fallback_model, fallback_token
+        else:
+            if os.getenv('DEBUG_HF') == '1':
+                print('[DEBUG] Ollama not available and no fallback LLM configured')
+            return ollama_base, ollama_model, "dummy-token"  # Will fail but provide clear error
     
     def _get_instrument_embeddings(self, df_local=None):
         """Lazy load and cache instrument embeddings"""
@@ -187,15 +219,17 @@ Return ONLY the names of the most relevant instruments (max {max_results}) that 
 
             if client is not None:
                 try:
+                    # Use the model configured by the fallback logic
+                    model_name = getattr(self, '_model_name', 'llama3')
                     response = client.chat.completions.create(
-                        model="moonshotai/Kimi-K2-Instruct-0905",
+                        model=model_name,
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=300,
                         temperature=0.1
                     )
                 except Exception:
                     if os.getenv('DEBUG_HF') == '1':
-                        print('\n[DEBUG_HF] Exception while calling HF/OpenAI router:')
+                        print('\n[DEBUG_HF] Exception while calling LLM/OpenAI router:')
                         import traceback
                         traceback.print_exc()
                     response = None

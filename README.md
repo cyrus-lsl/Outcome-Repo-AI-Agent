@@ -1,10 +1,10 @@
 # Measurement Instrument Assistant
 
-An AI-powered web application for finding and recommending measurement instruments for research purposes. Built with Streamlit and powered by Hugging Face AI models with semantic search capabilities.
+An AI-powered web application for finding and recommending measurement instruments for research purposes. Built with Streamlit and powered by a configurable LLM backend (cloud or self-hosted) with semantic search capabilities.
 
 ## Features
 
-- 🤖 **AI-powered chat interface** - Natural language queries using Hugging Face models
+- 🤖 **AI-powered chat interface** - Natural language queries using your configured LLM (cloud or self-hosted)
 - 🔍 **Semantic search** - Advanced embedding-based search for better relevance
 - 📊 **Excel data integration** - Seamless integration with measurement instrument databases
 - 💬 **Intelligent recommendations** - Context-aware instrument suggestions
@@ -17,7 +17,9 @@ An AI-powered web application for finding and recommending measurement instrumen
 ### Prerequisites
 
 - Python 3.11 or higher
-- Hugging Face API token ([Get one here](https://huggingface.co/settings/tokens))
+- An LLM endpoint:
+  - **Self-hosted (recommended for privacy):** e.g., Ollama running `llama3` at `http://localhost:11434/v1`, or
+  - **Cloud:** e.g., Hugging Face Inference Router or another OpenAI-compatible endpoint
 - Excel file with measurement instruments data
 
 ### Installation
@@ -36,7 +38,7 @@ An AI-powered web application for finding and recommending measurement instrumen
 3. **Configure environment variables**
    ```bash
    cp env.example .env
-   # Edit .env and add your HF_TOKEN
+   # Edit .env and set LLM_* and data path
    ```
 
 4. **Run the application**
@@ -53,15 +55,17 @@ An AI-powered web application for finding and recommending measurement instrumen
 
 The application can be configured via environment variables. See `env.example` for all available options.
 
-### Required Configuration
+### Required / Core Configuration
 
-- `HF_TOKEN` - Your Hugging Face API token (required)
+- `LLM_BASE_URL` - OpenAI-compatible base URL
+- `LLM_MODEL` - Model name to call
+- `LLM_API_KEY` - API key (for self-hosted Ollama, a dummy value is fine)
+- `EXCEL_FILE_PATH` - Path or URL to your Excel file (default: `measurement_instruments.xlsx`)
+- `EXCEL_SHEET_NAME` - Sheet name (default: `Measurement Instruments`)
 
-### Optional Configuration
+### Common Options
 
-- `EXCEL_FILE_PATH` - Path to your Excel file (default: `measurement_instruments.xlsx`)
-- `EXCEL_SHEET_NAME` - Sheet name in Excel file (default: `Measurement Instruments`)
-- `MAX_RESULTS` - Maximum number of results to return (default: `8`)
+- `MAX_RESULTS` - Maximum number of results (default: `8`)
 - `SEMANTIC_SEARCH_ENABLED` - Enable semantic search (default: `true`)
 - `ENABLE_CACHING` - Enable response caching (default: `true`)
 
@@ -90,6 +94,9 @@ Outcome Repo Agent/
 1. Start the application: `streamlit run frontend/app.py`
 2. Navigate to the Chat page for AI-powered search
 3. Use Manual Search for advanced filtering options
+4. In the sidebar “📂 Data Management”:
+   - **Upload updated Excel** to replace the dataset on the server
+   - **Refresh data now** to clear cache and reload from disk/URL
 
 ### Chat Interface
 
@@ -109,13 +116,57 @@ Outcome Repo Agent/
 
 ```bash
 docker build -t measurement-instrument-assistant .
-docker run -p 8501:8501 -e HF_TOKEN=your_token measurement-instrument-assistant
+docker run -p 8501:8501 \
+  -e LLM_BASE_URL=http://localhost:11434/v1 \
+  -e LLM_MODEL=llama3 \
+  -e LLM_API_KEY=dummy-token \
+  -e EXCEL_FILE_PATH=/app/measurement_instruments.xlsx \
+  measurement-instrument-assistant
 ```
 
 ### Heroku
 
 1. Set environment variables in Heroku dashboard
 2. Deploy using the Procfile
+
+### Automatic LLM Fallback
+
+The app automatically tries local Ollama first, then falls back to your configured cloud LLM if Ollama is not available.
+
+**Recommended setup (local only):**
+
+1. Install Ollama from https://ollama.com
+2. Run: `ollama pull llama3 && ollama serve`
+3. No `.env` configuration needed - the app auto-detects Ollama
+
+**Optional cloud fallback (.env):**
+
+Configure a cloud LLM to use when Ollama is not running:
+
+- **OpenAI:**
+  ```
+  LLM_BASE_URL=https://api.openai.com/v1
+  LLM_MODEL=gpt-4o-mini
+  LLM_API_KEY=<your_openai_key>
+  ```
+
+- **Azure OpenAI:**
+  ```
+  LLM_BASE_URL=https://your-resource.openai.azure.com/openai/deployments/your-deployment
+  LLM_MODEL=gpt-4
+  LLM_API_KEY=<your_azure_key>
+  ```
+
+With fallback configured:
+- Ollama running → uses local Llama 3 (private, no external calls)
+- Ollama not running → uses configured cloud LLM
+
+### Keeping data updated
+
+- Set `EXCEL_FILE_PATH` to a local path or a direct-download URL.
+- Use the sidebar **Upload updated Excel** to overwrite the file on the server, or **Refresh data now** to clear cache and re-read the file/URL.
+- If using a shared drive or synced folder, point `EXCEL_FILE_PATH` there; updates will be picked up after a refresh.
+- If using a URL, make sure it is a direct download link to `.xlsx` (not an HTML viewer).
 
 ## Security & Best Practices
 
@@ -137,9 +188,9 @@ Log levels can be configured in `config.py`.
 
 ### Common Issues
 
-1. **"HF_TOKEN not set" error**
-   - Ensure `.env` file exists with `HF_TOKEN` set
-   - Check that token is valid and has API access
+1. **"LLM_API_KEY not set" error**
+   - Ensure `.env` has `LLM_API_KEY` (or legacy `HF_TOKEN`) set
+   - For Ollama, any non-empty value is fine
 
 2. **Excel file not found**
    - Verify `EXCEL_FILE_PATH` points to correct file

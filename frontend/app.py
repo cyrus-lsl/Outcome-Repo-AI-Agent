@@ -38,6 +38,9 @@ def load_environment():
 
 def resolve_excel_path(excel_path: str) -> str:
     """Resolve Excel file path relative to project root"""
+    # Allow direct HTTP/HTTPS URLs for shared Excel files
+    if isinstance(excel_path, str) and excel_path.lower().startswith(("http://", "https://")):
+        return excel_path
     if os.path.isabs(excel_path):
         # Already an absolute path
         return excel_path
@@ -81,6 +84,17 @@ def load_dataframe(excel_path: str, sheet_name: str):
         raise
 
 
+def save_uploaded_excel(uploaded_file, dest_path: str):
+    """Persist an uploaded Excel file to the destination path."""
+    try:
+        with open(dest_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        return True, None
+    except Exception as e:
+        logger.error(f"Failed to save uploaded Excel to {dest_path}: {e}", exc_info=True)
+        return False, str(e)
+
+
 def build_dataset_context(df):
     """Build context string from the dataset"""
     context_parts = [f"Total instruments in database: {len(df)}"]
@@ -117,442 +131,279 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
     return text
 
 
-def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max_results=6, agent=None):
-    """Call Hugging Face chat model for responses with semantic search enhancement.
-
-    The function uses semantic search first (if available), then uses LLM to refine results.
-    """
-    try:
-        # Sanitize input
-        prompt = sanitize_input(prompt, max_length=Config.MAX_QUERY_LENGTH if Config else 500)
-        
-        if not prompt:
-            return {
-                'text': "Please provide a valid search query.",
-                'matched': [],
-                'unknown': []
-            }
-        
-        # Read HF token robustly (allow quoted tokens in .env)
-        if Config and Config.HF_TOKEN:
-            hf = Config.HF_TOKEN
-        else:
-            hf = os.environ.get("HF_TOKEN")
-            if isinstance(hf, str):
-                hf = hf.strip().strip('"\'')
-        
-        if not hf:
-            logger.error("HF_TOKEN not set in environment")
-            return {
-                'text': "Configuration error: API token not found. Please contact the administrator.",
-                'matched': [],
-                'unknown': []
-            }
-
-        base_url = Config.HF_BASE_URL if Config else "https://router.huggingface.co/v1"
-        model_name = Config.HF_MODEL if Config else "moonshotai/Kimi-K2-Instruct-0905"
-        client = OpenAI(base_url=base_url, api_key=hf)
-        logger.info(f"Processing query: {prompt[:50]}...")
-    except Exception as e:
-        logger.error(f"Error in initial setup: {e}", exc_info=True)
-        return {
-            'text': "An error occurred while initializing the search. Please try again or contact support.",
-            'matched': [],
-            'unknown': []
-        }
-
-    # Detect whether the user explicitly asked for instruments validated in Hong Kong
-    prompt_l = str(prompt or '').lower().strip()
+def get_llm_config_with_fallback():
+    """Get LLM configuration with automatic fallback from Ollama to configured cloud LLM"""
+    import requests
     
-    # Check for non-substantive queries (greetings, empty, too short)
-    greeting_patterns = [r'^\s*(hi|hello|hey|greetings|good\s+(morning|afternoon|evening))\s*[!?.]*\s*$', r'^\s*[!?.]+\s*$']
-    is_greeting = any(re.match(pattern, prompt_l) for pattern in greeting_patterns)
+    # Primary: try local Ollama (using smaller 3B model for better performance on M1)
+    ollama_base = "http://localhost:11434/v1"
+    ollama_model = "llama3.2:3b"  # Faster than llama3 (8B) on M1 Mac
     
-    if is_greeting or len(prompt_l) < 3:
-        return {
-            'text': "Hello! I can help you find measurement instruments. Please describe what you're looking for, for example:\n- 'mental health assessment for elderly'\n- 'physical activity questionnaire'\n- 'quality of life scale'\n\nWhat would you like to search for?",
-            'matched': [],
-            'unknown': []
-        }
-    want_validated_hk = False
+    # Fallback: use configured LLM from environment
+    fallback_base = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
+    fallback_model = os.environ.get("LLM_MODEL", "llama3")
+    fallback_token = os.environ.get("LLM_API_KEY") or os.environ.get("HF_TOKEN") or "dummy-token"
+    
+    # Check if Ollama is reachable
     try:
-        if re.search(r"validated.*hong|validated.*hk|validated in hong|validate.*hong|validate.*hk", prompt_l):
-            want_validated_hk = True
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if response.status_code == 200:
+            logger.info("✓ Using local Ollama (llama3)")
+            return ollama_base, ollama_model, "dummy-token"
     except Exception:
-        want_validated_hk = False
-    # Honor explicit UI toggle override
-    if validated_only:
-        want_validated_hk = True
+        pass
+    
+    # Fall back to configured LLM
+    if fallback_base != ollama_base or fallback_model != ollama_model:
+        logger.info(f"⚠ Ollama not available, using configured LLM: {fallback_model}")
+        return fallback_base, fallback_model, fallback_token
+    else:
+        logger.error("❌ Ollama not available and no fallback LLM configured. Please start Ollama or configure LLM_BASE_URL/LLM_MODEL.")
+        return ollama_base, ollama_model, "dummy-token"  # Will fail but provide clear error
 
-    # Parse item count constraints from query (e.g., "not more than 7 items", "less than 10", "maximum 5 items")
-    max_items = None
-    min_items = None
+
+def call_llm_chat(prompt, df, validated_only=False, prog_only=False, max_results=6, agent=None):
+    """Call the configured LLM for responses with semantic search enhancement.
+
+    The function uses semantic search first (if available), then uses the LLM to refine results.
+    """
+    prompt = sanitize_input(prompt, max_length=Config.MAX_QUERY_LENGTH if Config else 500)
+    if not prompt:
+        return {'text': "Please provide a valid search query.", 'matched': [], 'unknown': []}
+
+    prompt_l = str(prompt or '').lower().strip()
+    if not prompt_l:
+        return {'text': '', 'matched': [], 'unknown': []}
+
     try:
-        # Patterns for maximum item count
+        base_url, model_name, api_key = get_llm_config_with_fallback()
+        client = OpenAI(base_url=base_url, api_key=api_key)
+        
+        # Detect meta questions
+        classification_prompt = f'Is the following user query asking about what the AI/system can do, or is it searching for a measurement instrument?\n\nUser query: "{prompt}"\n\nRespond with ONLY one word: "META" if asking about system capabilities, or "SEARCH" if searching for instruments.'
+        try:
+            classification = client.chat.completions.create(
+                model=model_name, messages=[{"role": "user", "content": classification_prompt}],
+                max_tokens=10, temperature=0.0
+            )
+            is_meta_question = "META" in classification.choices[0].message.content.strip().upper()
+        except Exception:
+            is_meta_question = False
+    except Exception as e:
+        logger.error(f"Error initializing: {e}", exc_info=True)
+        return {'text': "An error occurred. Please try again.", 'matched': [], 'unknown': []}
+    
+    if is_meta_question:
+        try:
+            _, current_model, _ = get_llm_config_with_fallback()
+            model_info = f"using **{current_model}**"
+        except:
+            model_info = ""
+        return {
+            'text': f"""I'm an AI assistant designed to help you search for measurement instruments from your research database {model_info}.
+
+**What I can do:**
+- Search for measurement instruments by keywords, domains, or target groups
+- Filter by validation status (HK-validated)
+- Filter by programme-level metrics
+- Provide detailed information about each instrument
+
+**To search for instruments, try asking:**
+- "mental health assessment for elderly"
+- "physical activity questionnaire for youth"
+- "quality of life scale validated in Hong Kong"
+
+What measurement instrument would you like to find?""",
+            'matched': [],
+            'unknown': []
+        }
+    
+    want_validated_hk = validated_only or bool(re.search(r"validated.*hong|validated.*hk|validated in hong|validate.*hong|validate.*hk", prompt_l))
+
+    # Parse item count constraints
+    max_items = min_items = None
+    try:
         max_patterns = [
             r'(?:not\s+more\s+than|maximum|max|at\s+most|less\s+than|fewer\s+than|under|below)\s+(\d+)\s*(?:items?|questions?|statements?)?',
             r'(\d+)\s*(?:or\s+)?(?:fewer|less)\s*(?:items?|questions?|statements?)?',
         ]
         for pattern in max_patterns:
-            match = re.search(pattern, prompt_l)
-            if match:
+            if match := re.search(pattern, prompt_l):
                 max_items = int(match.group(1))
-                logger.info(f"Detected maximum item count constraint: {max_items}")
                 break
         
-        # Patterns for minimum item count
         min_patterns = [
             r'(?:at\s+least|minimum|min|more\s+than|greater\s+than|over|above)\s+(\d+)\s*(?:items?|questions?|statements?)?',
             r'(\d+)\s*(?:or\s+)?(?:more|greater)\s*(?:items?|questions?|statements?)?',
         ]
         for pattern in min_patterns:
-            match = re.search(pattern, prompt_l)
-            if match:
+            if match := re.search(pattern, prompt_l):
                 min_items = int(match.group(1))
-                logger.info(f"Detected minimum item count constraint: {min_items}")
                 break
         
-        # Exact count (e.g., "exactly 7 items", "7 items")
-        exact_pattern = r'(?:exactly|precisely|exactly\s+)?(\d+)\s*(?:items?|questions?|statements?)(?:\s+only)?'
-        exact_match = re.search(exact_pattern, prompt_l)
-        if exact_match and max_items is None and min_items is None:
-            exact_count = int(exact_match.group(1))
-            max_items = exact_count
-            min_items = exact_count
-            logger.info(f"Detected exact item count constraint: {exact_count}")
+        if not max_items and not min_items:
+            if match := re.search(r'(?:exactly|precisely|exactly\s+)?(\d+)\s*(?:items?|questions?|statements?)(?:\s+only)?', prompt_l):
+                max_items = min_items = int(match.group(1))
     except Exception as e:
-        logger.warning(f"Error parsing item count constraints: {e}")
+        logger.warning(f"Error parsing item count: {e}")
 
-    # Helper to interpret free-text 'Validated in Hong Kong' values conservatively
     def _validated_in_hk_text(x):
         s = str(x or '').lower().strip()
-        if not s or s in ('-', 'na', 'n/a'):
+        if not s or s in ('-', 'na', 'n/a') or 'not validated' in s or 'not in hong' in s or re.search(r'not .*hong|\bno\b', s):
             return False
-        if 'not validated' in s or 'not validated in hong' in s:
-            return False
-        if 'not in hong' in s or 'not in hong kong' in s or re.search(r'not .*hong', s):
-            return False
-        if re.search(r"\bno\b", s):
-            return False
-        if s.startswith('yes'):
-            return True
-        if ('hong' in s or 'hk' in s or 'hong kong' in s) and ('valid' in s or 'develop' in s or 'refer' in s):
-            return True
-        if 'validated' in s and 'hong' in s:
-            return True
-        return False
+        return s.startswith('yes') or ('validated' in s and 'hong' in s) or (('hong' in s or 'hk' in s) and ('valid' in s or 'develop' in s or 'refer' in s))
 
-    # Optionally filter the dataframe to only instruments validated in HK
     df_for_model = df
     if want_validated_hk and 'Validated in Hong Kong' in df.columns:
         try:
             df_for_model = df[df['Validated in Hong Kong'].apply(_validated_in_hk_text)]
         except Exception:
-            df_for_model = df
-    # Optionally filter to programme-level metrics if requested by UI
+            pass
     if prog_only and 'Programme-level metric?' in df_for_model.columns:
         try:
             df_for_model = df_for_model[df_for_model['Programme-level metric?'].astype(str).str.strip().str.lower().isin(['yes','y','true'])]
         except Exception:
             pass
 
-    # Filter by item count constraints if specified (apply early for efficiency)
-    if max_items is not None or min_items is not None:
-        def parse_item_count_from_df(item_str):
-            """Parse item count from dataframe cell"""
-            if pd.isna(item_str):
-                return None
-            item_str = str(item_str).strip()
-            match = re.search(r'(\d+)', item_str)
-            if match:
-                return int(match.group(1))
-            return None
-        
-        if 'No. of Questions / Statements' in df_for_model.columns:
-            try:
-                item_counts = df_for_model['No. of Questions / Statements'].apply(parse_item_count_from_df)
-                mask = pd.Series([True] * len(df_for_model), index=df_for_model.index)
-                
-                if max_items is not None:
-                    max_mask = (item_counts <= max_items) | (item_counts.isna())
-                    mask = mask & max_mask
-                
-                if min_items is not None:
-                    min_mask = (item_counts >= min_items) | (item_counts.isna())
-                    mask = mask & min_mask
-                
-                df_for_model = df_for_model[mask]
-                logger.info(f"Pre-filtered dataframe to {len(df_for_model)} instruments matching item count constraints")
-            except Exception as e:
-                logger.warning(f"Error filtering by item count: {e}")
-
-    # Try semantic search first if agent is available and has semantic search enabled
-    semantic_results = []
-    if agent and hasattr(agent, 'use_semantic_search') and agent.use_semantic_search:
+    if (max_items is not None or min_items is not None) and 'No. of Questions / Statements' in df_for_model.columns:
         try:
-            semantic_search_results = agent.semantic_search(prompt, max_results=max_results * 2, df_override=df_for_model, min_similarity=0.25)
-            if semantic_search_results:
-                # Convert to our format
-                for result in semantic_search_results[:max_results]:
-                    row = result['instrument']
-                    semantic_results.append({
-                        'name': row.get('Measurement Instrument', ''),
-                        'acronym': row.get('Acronym', ''),
-                        'purpose': row.get('Purpose', ''),
-                        'target': row.get('Target Group(s)', ''),
-                        'domain': row.get('Outcome Domain', ''),
-                        'no_of_items': row.get('No. of Questions / Statements', ''),
-                        'sample_q1': row.get('Sample Question / Statement - 1', ''),
-                        'sample_q2': row.get('Sample Question / Statement - 2', ''),
-                        'sample_q3': row.get('Sample Question / Statement - 3', ''),
-                        'scale': row.get('Scale', ''),
-                        'scoring': row.get('Scoring', ''),
-                        'validated': row.get('Validated in Hong Kong', ''),
-                        'programme_level': row.get('Programme-level metric?', ''),
-                        'download_eng': row.get('Download (Eng)', ''),
-                        'download_chi': row.get('Download (Chi)', ''),
-                        'citation': row.get('Citation', ''),
-                        'semantic_score': result.get('semantic_score', 0)
-                    })
+            def parse_count(x):
+                if pd.isna(x):
+                    return None
+                if match := re.search(r'(\d+)', str(x).strip()):
+                    return int(match.group(1))
+                return None
+            
+            item_counts = df_for_model['No. of Questions / Statements'].apply(parse_count)
+            mask = pd.Series([True] * len(df_for_model), index=df_for_model.index)
+            if max_items is not None:
+                mask &= (item_counts <= max_items) | (item_counts.isna())
+            if min_items is not None:
+                mask &= (item_counts >= min_items) | (item_counts.isna())
+            df_for_model = df_for_model[mask]
         except Exception as e:
-            if os.getenv('DEBUG_HF') == '1':
-                print(f'[DEBUG] Semantic search error: {e}')
+            logger.warning(f"Error filtering by item count: {e}")
 
-    # Build instrument lines and name list (use semantic results if available, otherwise all)
     inst_lines = []
     instrument_names = []
-    if semantic_results:
-        # Use semantic search results to build a focused list for LLM
-        for ins in semantic_results:
-            name = ins.get('name', '').strip()
-            if name:
-                instrument_names.append(name)
-                items = str(ins.get('no_of_items', '')).strip() or 'N/A'
-                inst_lines.append(f"{name} | {ins.get('domain', '')} | {ins.get('target', '')} | Items: {items} | Programme-level: {ins.get('programme_level', '')}")
-    else:
-        # Fallback to all instruments
-        for _, row in df_for_model.iterrows():
-            name = str(row.get('Measurement Instrument', '')).strip()
-            if not name:
-                continue
-            domain = str(row.get('Outcome Domain', '')).strip()
-            target = str(row.get('Target Group(s)', '')).strip()
+    for _, row in df_for_model.iterrows():
+        name = str(row.get('Measurement Instrument', '')).strip()
+        if name:
+            domain = str(row.get('Outcome Domain', '')).strip()[:30]
+            target = str(row.get('Target Group(s)', '')).strip()[:30]
             items = str(row.get('No. of Questions / Statements', '')).strip() or 'N/A'
-            prog_flag = str(row.get('Programme-level metric?', '')).strip()
-            inst_lines.append(f"{name} | {domain} | {target} | Items: {items} | Programme-level: {prog_flag}")
+            inst_lines.append(f"{name}|{domain}|{target}|{items}")
             instrument_names.append(name)
 
-    # If we have good semantic results, use them directly (faster and more accurate)
-    if semantic_results and len(semantic_results) >= max_results // 2:
-        matched = semantic_results[:max_results]
-        unknown = []
+    item_constraint_note = ""
+    if max_items == min_items and max_items is not None:
+        item_constraint_note = f"IMPORTANT: User requested exactly {max_items} items.\n"
     else:
-        # Use LLM to refine or get additional results
-        item_constraint_note = ""
         if max_items is not None:
-            item_constraint_note += f"IMPORTANT: The user requested instruments with at most {max_items} items. Only select instruments where the item count is {max_items} or fewer.\n"
+            item_constraint_note += f"IMPORTANT: User requested at most {max_items} items.\n"
         if min_items is not None:
-            item_constraint_note += f"IMPORTANT: The user requested instruments with at least {min_items} items. Only select instruments where the item count is {min_items} or more.\n"
-        if max_items is not None and min_items is not None and max_items == min_items:
-            item_constraint_note = f"IMPORTANT: The user requested instruments with exactly {max_items} items. Only select instruments with exactly {max_items} items.\n"
-        
-        system_message = (
-            "You are an assistant that selects only instrument NAMES from the provided DATABASE. "
-            "You will be given a list of instruments with short metadata (Domain, Target groups, Item count, Programme-level flag). Do NOT invent any names. "
-            "IMPORTANT: If the user query is a greeting (like 'hi', 'hello'), a non-substantive query, or too vague to match any instruments, return an EMPTY JSON array: []. "
-            "Only return instrument names when the query is a substantive search request about measurement instruments. "
-            f"Return ONLY a valid JSON array (e.g. [\"Name A\", \"Name B\"] or [] for non-substantive queries) containing up to {max_results} names that appear in the provided list."
+            item_constraint_note += f"IMPORTANT: User requested at least {min_items} items.\n"
+    
+    system_message = f"Select instrument NAMES from database. Format: Name|Domain|Target|Items. Return JSON array with up to {max_results} names, or [] if no matches. Do NOT invent names."
+    user_message = (
+        f"DB: {chr(10).join(inst_lines)}\n\nQuery: {prompt}\n"
+        + ("[HK-validated only]\n" if want_validated_hk else "")
+        + ("[Programme-level only]\n" if prog_only else "")
+        + item_constraint_note
+        + f"Return JSON array of matching instrument names (max {max_results})."
+    )
+
+    try:
+        completion = client.chat.completions.create(
+            model=model_name, messages=[{"role": "system", "content": system_message}, {"role": "user", "content": user_message}],
+            max_tokens=200, temperature=0.0
         )
-
-        user_message = (
-            f"DATABASE OF MEASUREMENT INSTRUMENTS:\nEach line: Name | Domain | Target(s) | Items: <count> | Programme-level\n{chr(10).join(inst_lines)}\n\n"
-            f"USER QUERY: {prompt}\n\n"
-            + ("NOTE: The user requested only instruments validated in Hong Kong.\n" if want_validated_hk else "")
-            + ("NOTE: The user requested only programme-level instruments.\n" if prog_only else "")
-            + (item_constraint_note if item_constraint_note else "")
-            + f"If the query is a greeting or not substantive enough to match instruments, return []. Otherwise, choose up to {max_results} instruments from the provided list that best match the user query, considering Domain, Purpose, Target groups, and Item count constraints. Return a JSON array with instrument names only."
-        )
-
-        try:
-            model_name = Config.HF_MODEL if Config else "moonshotai/Kimi-K2-Instruct-0905"
-            completion = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "system", "content": system_message}, {"role": "user", "content": user_message}],
-                max_tokens=400,
-                temperature=0.0,
-            )
-        except Exception as e:
-            logger.error(f"LLM API call failed: {e}", exc_info=True)
-            # If LLM fails but we have semantic results, use those
-            if semantic_results:
-                matched = semantic_results[:max_results]
-                unknown = []
-            else:
-                return {
-                    'text': "I encountered an error while processing your request. Please try again or rephrase your query.",
-                    'matched': [],
-                    'unknown': []
-                }
-
         llm_text = completion.choices[0].message.content
+    except Exception as e:
+        logger.error(f"LLM API call failed: {e}", exc_info=True)
+        return {'text': "I encountered an error. Please try again.", 'matched': [], 'unknown': []}
 
-        # Parse JSON array or fallback to line-splitting
-        import json
-        names = []
+    import json
+    try:
+        parsed = json.loads(llm_text)
+        names = [str(x).strip() for x in parsed if x] if isinstance(parsed, list) else []
+    except Exception:
+        names = [line.strip(' -') for line in llm_text.split('\n') if line.strip()]
+
+    matched = []
+    unknown = []
+    available_set = {n.lower() for n in instrument_names}
+    
+    for nm in names:
+        if nm.strip().lower() not in available_set:
+            unknown.append(nm)
+            continue
         try:
-            parsed = json.loads(llm_text)
-            if isinstance(parsed, list):
-                names = [str(x).strip() for x in parsed if x]
-        except Exception:
-            names = [line.strip(' -') for line in llm_text.split('\n') if line.strip()]
+            match = df_for_model[df_for_model['Measurement Instrument'].str.contains(nm, case=False, na=False, regex=False)]
+        except TypeError:
+            match = df_for_model[df_for_model['Measurement Instrument'].str.contains(re.escape(nm), case=False, na=False)]
+        if not match.empty and len(matched) < max_results:
+            r = match.iloc[0]
+            matched.append({
+                'name': r.get('Measurement Instrument', ''),
+                'acronym': r.get('Acronym', ''),
+                'purpose': r.get('Purpose', ''),
+                'target': r.get('Target Group(s)', ''),
+                'domain': r.get('Outcome Domain', ''),
+                'no_of_items': r.get('No. of Questions / Statements', ''),
+                'sample_q1': r.get('Sample Question / Statement - 1', ''),
+                'sample_q2': r.get('Sample Question / Statement - 2', ''),
+                'sample_q3': r.get('Sample Question / Statement - 3', ''),
+                'scale': r.get('Scale', ''),
+                'scoring': r.get('Scoring', ''),
+                'validated': r.get('Validated in Hong Kong', ''),
+                'programme_level': r.get('Programme-level metric?', ''),
+                'download_eng': r.get('Download (Eng)', ''),
+                'download_chi': r.get('Download (Chi)', ''),
+                'citation': r.get('Citation', ''),
+                'semantic_score': None
+            })
 
-        # Validate that returned names actually exist
-        matched = semantic_results.copy() if semantic_results else []
-        unknown = []
-        available_set = {n.lower() for n in instrument_names}
-        existing_names = {m.get('name', '').lower() for m in matched}
-        
-        for nm in names:
-            if nm.strip().lower() not in available_set:
-                unknown.append(nm)
-                continue
-            if nm.strip().lower() in existing_names:
-                continue  # Already in semantic results
-            try:
-                match = df_for_model[df_for_model['Measurement Instrument'].str.contains(nm, case=False, na=False, regex=False)]
-            except TypeError:
-                match = df_for_model[df_for_model['Measurement Instrument'].str.contains(re.escape(nm), case=False, na=False)]
-            if not match.empty and len(matched) < max_results:
-                r = match.iloc[0]
-                matched.append({
-                    'name': r.get('Measurement Instrument', ''),
-                    'acronym': r.get('Acronym', ''),
-                    'purpose': r.get('Purpose', ''),
-                    'target': r.get('Target Group(s)', ''),
-                    'domain': r.get('Outcome Domain', ''),
-                    'no_of_items': r.get('No. of Questions / Statements', ''),
-                    'sample_q1': r.get('Sample Question / Statement - 1', ''),
-                    'sample_q2': r.get('Sample Question / Statement - 2', ''),
-                    'sample_q3': r.get('Sample Question / Statement - 3', ''),
-                    'scale': r.get('Scale', ''),
-                    'scoring': r.get('Scoring', ''),
-                    'validated': r.get('Validated in Hong Kong', ''),
-                    'programme_level': r.get('Programme-level metric?', ''),
-                    'download_eng': r.get('Download (Eng)', ''),
-                    'download_chi': r.get('Download (Chi)', ''),
-                    'citation': r.get('Citation', ''),
-                    'semantic_score': None
-                })
-
-        if unknown and os.getenv('DEBUG_HF') == '1':
-            logger.debug(f'Model returned names not in spreadsheet: {unknown}')
+    if unknown and os.getenv('DEBUG_HF') == '1':
+        logger.debug(f'Model returned names not in spreadsheet: {unknown}')
 
     if not matched:
-        # Check if this was a greeting or non-substantive query
-        if is_greeting or len(prompt_l) < 3:
-            return {
-                'text': "Hello! I can help you find measurement instruments. Please describe what you're looking for, for example:\n- 'mental health assessment for elderly'\n- 'physical activity questionnaire'\n- 'quality of life scale'\n\nWhat would you like to search for?",
-                'matched': [],
-                'unknown': unknown
-            }
-        return {'text': 'No matching instruments found in the database. Please try a more specific query.', 'matched': [], 'unknown': unknown}
+        return {'text': 'No matching instruments found. Please try a more specific query.', 'matched': [], 'unknown': unknown}
 
-    def _lower(x):
-        try:
-            return str(x).lower()
-        except Exception:
-            return ''
-
-    # Sort by semantic score if available (higher is better)
-    matched.sort(key=lambda x: x.get('semantic_score', 0), reverse=True)
-    
-    # Extract meaningful tokens (exclude common words and very short tokens)
-    common_words = {'the', 'and', 'or', 'for', 'with', 'from', 'that', 'this', 'what', 'which', 'are', 'can', 'how', 'when', 'where', 'who', 'why', 'will', 'would', 'should', 'could', 'may', 'might', 'must', 'have', 'has', 'had', 'was', 'were', 'been', 'being', 'do', 'does', 'did', 'get', 'got', 'give', 'take', 'make', 'see', 'know', 'think', 'want', 'need', 'use', 'find', 'search', 'look', 'show', 'tell', 'ask', 'help', 'about', 'measure', 'assessment', 'scale', 'questionnaire', 'test', 'tool', 'instrument'}
-    qtokens = [t for t in re.findall(r"\w+", _lower(prompt)) if len(t) > 2 and t not in common_words]
-    
-    # If no meaningful tokens after filtering and no semantic scores, return no matches
-    has_semantic_scores = any(ins.get('semantic_score') for ins in matched)
-    if not qtokens and not has_semantic_scores:
-        return {'text': 'Please provide a more specific query. For example, try:\n- "mental health assessment"\n- "physical activity questionnaire"\n- "quality of life scale for elderly"\n\nWhat are you looking for?', 'matched': [], 'unknown': unknown}
-    
-    # If we have semantic scores, trust them and skip strict token filtering
-    if has_semantic_scores:
-        filtered = matched
-        filter_note = ''
-    else:
-        # Apply token-based filtering for LLM results
-        filtered = []
-        for ins in matched:
-            hay = ' '.join([_lower(ins.get('name', '')), _lower(ins.get('domain', '')), _lower(ins.get('purpose', '')), _lower(ins.get('target', ''))])
-            # Require at least one meaningful token match
-            if any(tok in hay for tok in qtokens):
-                filtered.append(ins)
-
-        filter_note = ''
-
-        if not filtered:
-            filtered = matched
-            filter_note = ' (did not find stricter matches; showing best matches)'
-
+    filtered = matched
     if want_validated_hk:
-        validated_filtered = [ins for ins in filtered if _validated_in_hk_text(ins.get('validated', ''))]
-        if validated_filtered:
-            filtered = validated_filtered
-            filter_note = ''
-        else:
+        filtered = [ins for ins in filtered if _validated_in_hk_text(ins.get('validated', ''))]
+        if not filtered:
             return {'text': 'No instruments validated in Hong Kong found matching the query.', 'matched': [], 'unknown': unknown}
 
-    # Filter by item count constraints if specified
     if max_items is not None or min_items is not None:
-        def parse_item_count(item_str):
-            """Parse item count from string (e.g., '10', '10-15', '10 items')"""
-            if not item_str or pd.isna(item_str):
+        def parse_count(x):
+            if not x or pd.isna(x):
                 return None
-            item_str = str(item_str).strip()
-            # Try to extract first number (for ranges like "10-15", take the first)
-            match = re.search(r'(\d+)', item_str)
-            if match:
+            if match := re.search(r'(\d+)', str(x).strip()):
                 return int(match.group(1))
             return None
         
-        item_filtered = []
-        for ins in filtered:
-            item_count = parse_item_count(ins.get('no_of_items', ''))
-            if item_count is None:
-                # If item count is not available, skip this instrument when filtering by items
-                # (user explicitly asked for item count, so we should only show instruments with known counts)
-                continue
-            
-            # Check constraints
-            if max_items is not None and item_count > max_items:
-                continue
-            if min_items is not None and item_count < min_items:
-                continue
-            
-            item_filtered.append(ins)
+        item_filtered = [ins for ins in filtered 
+                        if (count := parse_count(ins.get('no_of_items', ''))) is not None
+                        and (max_items is None or count <= max_items)
+                        and (min_items is None or count >= min_items)]
         
         if item_filtered:
             filtered = item_filtered
-            filter_note = ''
-            logger.info(f"Filtered to {len(filtered)} instruments matching item count constraints")
         else:
-            constraint_text = []
+            constraints = []
             if max_items is not None:
-                constraint_text.append(f"maximum {max_items} items")
+                constraints.append(f"maximum {max_items} items")
             if min_items is not None:
-                constraint_text.append(f"minimum {min_items} items")
-            constraint_str = " and ".join(constraint_text)
-            return {
-                'text': f'No instruments found matching your query with {constraint_str}. Please try adjusting your search criteria.',
-                'matched': [],
-                'unknown': unknown
-            }
+                constraints.append(f"minimum {min_items} items")
+            return {'text': f'No instruments found with {" and ".join(constraints)}. Please try adjusting your search criteria.', 
+                   'matched': [], 'unknown': unknown}
 
     out_parts = []
     for ins in filtered:
         part = f"**{ins['name']}" + (f" ({ins['acronym']})" if ins['acronym'] else '') + f"** — {ins['domain']}\n\n"
-        part += f"**Purpose:** {ins['purpose']}  \n"
-        part += f"**Target:** {ins['target']}  \n"
+        part += f"**Purpose:** {ins['purpose']}  \n**Target:** {ins['target']}  \n"
         if ins['no_of_items']:
             part += f"**Items:** {ins['no_of_items']}  \n"
         if ins['scale']:
@@ -567,12 +418,100 @@ def call_huggingface_chat(prompt, df, validated_only=False, prog_only=False, max
             part += f"**Citation:** {ins['citation']}  \n"
         out_parts.append(part)
 
-    md = "\n\n".join(out_parts) + filter_note
-    return {'text': md, 'matched': filtered, 'unknown': unknown}
+    return {'text': "\n\n".join(out_parts), 'matched': filtered, 'unknown': unknown}
+
+
+def _display_response(response, matched):
+    """Helper function to display assistant response (instruments or text)"""
+    if isinstance(response, dict) and 'matched' in response:
+        matched = response.get('matched', [])
+        if not matched:
+            text = response.get('text', '')
+            # Only show message if text is not empty
+            if text:
+                st.info(text)
+        else:
+            # Don't show "Found X instruments" text
+            pass
+            
+            # Display instruments with improved layout
+            for idx, ins in enumerate(matched, 1):
+                # Build expander title with badges
+                title_parts = [f"{idx}. {ins.get('name', 'Unknown')}"]
+                if ins.get('acronym'):
+                    title_parts.append(f"({ins.get('acronym')})")
+                
+                with st.expander(" ".join(title_parts), expanded=(idx == 1)):
+                    # Domain badge
+                    if ins.get('domain'):
+                        st.markdown(f'<span class="badge badge-domain">📁 {ins.get("domain")}</span>', unsafe_allow_html=True)
+                    
+                    # Validation and programme badges
+                    badge_html = ""
+                    validated_val = ins.get('validated', '')
+                    if validated_val:
+                        s = str(validated_val).lower().strip()
+                        is_validated = (s.startswith('yes') or 
+                                      (('hong' in s or 'hk' in s) and ('valid' in s or 'develop' in s or 'refer' in s)) or
+                                      ('validated' in s and 'hong' in s))
+                        if is_validated and 'not' not in s and 'no' not in s:
+                            badge_html += '<span class="badge badge-validated">✓ HK Validated</span>'
+                    if ins.get('programme_level') and str(ins.get('programme_level', '')).strip().lower() in ['yes', 'y', 'true']:
+                        badge_html += '<span class="badge badge-programme">📊 Programme-level</span>'
+                    if badge_html:
+                        st.markdown(badge_html, unsafe_allow_html=True)
+                    
+                    st.markdown("---")
+                    
+                    # Purpose
+                    if ins.get('purpose'):
+                        st.markdown(f"**📝 Purpose:**  \n{ins.get('purpose')}")
+                    
+                    # Target group
+                    if ins.get('target'):
+                        st.markdown(f"**👥 Target Group:** {ins.get('target')}")
+                    
+                    # Details in columns
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if ins.get('no_of_items'):
+                            st.metric("Items", ins.get('no_of_items'))
+                        if ins.get('scale'):
+                            st.markdown(f"**Scale:** {ins.get('scale')}")
+                    with col2:
+                        if ins.get('scoring'):
+                            st.markdown(f"**Scoring:** {ins.get('scoring')}")
+                    
+                    # Sample questions
+                    sample_questions = []
+                    for q_key in ['sample_q1', 'sample_q2', 'sample_q3']:
+                        if ins.get(q_key):
+                            sample_questions.append(ins.get(q_key))
+                    
+                    if sample_questions:
+                        with st.expander("📋 Sample Questions", expanded=False):
+                            for q in sample_questions:
+                                st.markdown(f"• {q}")
+                    
+                    # Downloads and citation
+                    download_links = []
+                    if ins.get('download_eng'):
+                        download_links.append(f"[📥 Download (English)]({ins.get('download_eng')})")
+                    if ins.get('download_chi'):
+                        download_links.append(f"[📥 Download (中文)]({ins.get('download_chi')})")
+                    
+                    if download_links:
+                        st.markdown("**Downloads:** " + " | ".join(download_links))
+                    
+                    if ins.get('citation'):
+                        with st.expander("📚 Citation", expanded=False):
+                            st.markdown(ins.get('citation'))
+    else:
+        st.markdown(response if isinstance(response, str) else str(response))
 
 
 def render_chat_page(agent, df):
-    """Render the chat interface"""
+    """Render the chat interface with conversation history"""
     
     # Add custom CSS for better styling
     st.markdown("""
@@ -621,131 +560,161 @@ def render_chat_page(agent, df):
         </style>
     """, unsafe_allow_html=True)
     
+    # Auto-scroll script
+    st.markdown("""
+    <script>
+    function scrollToBottom() {
+        const chatMessages = document.querySelectorAll('[data-testid="stChatMessage"]');
+        if (chatMessages.length > 0) {
+            chatMessages[chatMessages.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+    }
+    
+    function setupChat() {
+        setTimeout(scrollToBottom, 500);
+    }
+    
+    // Run on load and after updates
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', setupChat);
+    } else {
+        setupChat();
+    }
+    
+    window.addEventListener('load', setupChat);
+    
+    // Watch for changes and auto-scroll
+    const observer = new MutationObserver(function() {
+        setTimeout(setupChat, 200);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    </script>
+    """, unsafe_allow_html=True)
+    
     st.subheader("💬 Chat with AI Assistant")
     
-    # Improved info section with better styling
-    with st.container():
-        st.markdown("""
-        <div class="info-box">
-            <strong>💡 How to use:</strong><br>
-            Ask questions in natural language, for example:<br>
-            • "mental health assessment for elderly"<br>
-            • "physical activity questionnaire"<br>
-            • "quality of life scale for youth"
-        </div>
-        """, unsafe_allow_html=True)
+    # Help section with example questions
+    st.markdown("""
+    Hello! I can help you find measurement instruments. Please describe what you're looking for, for example:
+    
+    - 'mental health assessment for elderly'
+    - 'physical activity questionnaire'
+    - 'quality of life scale'
+    
+    What would you like to search for?
+    """)
+    
+    # Initialize chat messages history - clear on app restart
+    if 'chat_initialized' not in st.session_state:
+        st.session_state.chat_messages = []
+        st.session_state.chat_initialized = True
+    # Ensure it exists
+    if 'chat_messages' not in st.session_state:
+        st.session_state.chat_messages = []
 
-    # Initialize checkbox state
-    if 'chat_validated_only' not in st.session_state:
-        st.session_state.chat_validated_only = False
-    if 'chat_prog_only' not in st.session_state:
-        st.session_state.chat_prog_only = False
+    # Display chat history
+    for message in st.session_state.chat_messages:
+        with st.chat_message(message["role"]):
+            if message["role"] == "user":
+                st.markdown(message["content"])
+            else:
+                # Display assistant response (can be text or instrument results)
+                if isinstance(message["content"], dict):
+                    _display_response(message["content"], message.get("matched", []))
+                else:
+                    st.markdown(message["content"])
 
-    # Fixed controls at bottom, above chat input
-    # These will be placed in Streamlit's bottom container automatically
-    filter_col1, filter_col2 = st.columns([1, 1])
-    with filter_col1:
-        st.session_state.chat_validated_only = st.checkbox("✅ HK-validated only", value=st.session_state.chat_validated_only, help="Show only instruments validated in Hong Kong")
-    with filter_col2:
-        st.session_state.chat_prog_only = st.checkbox("📊 Programme-level only", value=st.session_state.chat_prog_only, help="Show only programme-level metrics")
-
-    # Chat input - always at bottom (most bottom)
+    # Chat input - stays at bottom (native Streamlit behavior)
     if prompt := st.chat_input("Ask about measurement instruments..."):
+        # Add user message to history
+        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+        
+        # Display user message immediately
         with st.chat_message("user"):
             st.markdown(prompt)
+        
+        # Get AI response (no filters)
         with st.chat_message("assistant"):
             with st.spinner("🤔 Searching..."):
-                response = call_huggingface_chat(
+                response = call_llm_chat(
                     prompt,
                     df,
-                    validated_only=st.session_state.chat_validated_only,
-                    prog_only=st.session_state.chat_prog_only,
+                    validated_only=False,
+                    prog_only=False,
                     max_results=8,
                     agent=agent,
                 )
 
-            if isinstance(response, dict) and 'matched' in response:
-                matched = response.get('matched', [])
-                if not matched:
-                    st.info(response.get('text', 'No matching instruments found in the database.'))
+            # Display response
+            _display_response(response, response.get('matched', []) if isinstance(response, dict) else [])
+            
+            # Save response to history
+            st.session_state.chat_messages.append({
+                "role": "assistant", 
+                "content": response,
+                "matched": response.get('matched', []) if isinstance(response, dict) else []
+            })
+
+
+def render_data_management_page(df, excel_path):
+    """Render the data management page"""
+    st.title("📂 Data Management")
+    
+    # Database Overview - Top section with cards
+    st.markdown("### 📊 Current Database")
+    overview_col1, overview_col2 = st.columns(2)
+    with overview_col1:
+        st.metric("Total Instruments", len(df))
+    with overview_col2:
+        if 'Outcome Domain' in df.columns:
+            domains = df['Outcome Domain'].dropna().unique()
+            st.metric("Domains", len(domains))
+        else:
+            st.metric("Domains", "N/A")
+    
+    # Current data source in a container
+    with st.container():
+        st.markdown("**Current Data Source:**")
+        st.code(excel_path, language=None)
+    
+    st.divider()
+    
+    # Upload Section - Clean card-like layout
+    st.markdown("### 📤 Upload New Dataset")
+    
+    with st.container():
+        uploaded_file = st.file_uploader(
+            "Choose an Excel file (.xlsx) to replace the current dataset",
+            type=["xlsx"],
+            help="The uploaded file will replace the current dataset and clear the cache automatically",
+            key="data_mgmt_uploader"
+        )
+        
+        if uploaded_file is not None:
+            with st.spinner("Uploading and saving..."):
+                ok, err = save_uploaded_excel(uploaded_file, excel_path)
+                if ok:
+                    load_dataframe.clear()
+                    st.success("✅ File uploaded and saved successfully!")
+                    if st.button("🔄 Reload Now", type="primary", use_container_width=True):
+                        st.rerun()
                 else:
-                    # Show result count
-                    st.markdown(f'<div class="result-count">Found {len(matched)} instrument{"s" if len(matched) != 1 else ""}</div>', unsafe_allow_html=True)
-                    
-                    # Display instruments with improved layout
-                    for idx, ins in enumerate(matched, 1):
-                        # Build expander title with badges
-                        title_parts = [f"{idx}. {ins.get('name', 'Unknown')}"]
-                        if ins.get('acronym'):
-                            title_parts.append(f"({ins.get('acronym')})")
-                        
-                        with st.expander(" ".join(title_parts), expanded=(idx == 1)):
-                            # Domain badge
-                            if ins.get('domain'):
-                                st.markdown(f'<span class="badge badge-domain">📁 {ins.get("domain")}</span>', unsafe_allow_html=True)
-                            
-                            # Validation and programme badges
-                            badge_html = ""
-                            validated_val = ins.get('validated', '')
-                            if validated_val:
-                                s = str(validated_val).lower().strip()
-                                is_validated = (s.startswith('yes') or 
-                                              (('hong' in s or 'hk' in s) and ('valid' in s or 'develop' in s or 'refer' in s)) or
-                                              ('validated' in s and 'hong' in s))
-                                if is_validated and 'not' not in s and 'no' not in s:
-                                    badge_html += '<span class="badge badge-validated">✓ HK Validated</span>'
-                            if ins.get('programme_level') and str(ins.get('programme_level', '')).strip().lower() in ['yes', 'y', 'true']:
-                                badge_html += '<span class="badge badge-programme">📊 Programme-level</span>'
-                            if badge_html:
-                                st.markdown(badge_html, unsafe_allow_html=True)
-                            
-                            st.markdown("---")
-                            
-                            # Purpose
-                            if ins.get('purpose'):
-                                st.markdown(f"**📝 Purpose:**  \n{ins.get('purpose')}")
-                            
-                            # Target group
-                            if ins.get('target'):
-                                st.markdown(f"**👥 Target Group:** {ins.get('target')}")
-                            
-                            # Details in columns
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                if ins.get('no_of_items'):
-                                    st.metric("Items", ins.get('no_of_items'))
-                                if ins.get('scale'):
-                                    st.markdown(f"**Scale:** {ins.get('scale')}")
-                            with col2:
-                                if ins.get('scoring'):
-                                    st.markdown(f"**Scoring:** {ins.get('scoring')}")
-                            
-                            # Sample questions
-                            sample_questions = []
-                            for q_key in ['sample_q1', 'sample_q2', 'sample_q3']:
-                                if ins.get(q_key):
-                                    sample_questions.append(ins.get(q_key))
-                            
-                            if sample_questions:
-                                with st.expander("📋 Sample Questions", expanded=False):
-                                    for q in sample_questions:
-                                        st.markdown(f"• {q}")
-                            
-                            # Downloads and citation
-                            download_links = []
-                            if ins.get('download_eng'):
-                                download_links.append(f"[📥 Download (English)]({ins.get('download_eng')})")
-                            if ins.get('download_chi'):
-                                download_links.append(f"[📥 Download (中文)]({ins.get('download_chi')})")
-                            
-                            if download_links:
-                                st.markdown("**Downloads:** " + " | ".join(download_links))
-                            
-                            if ins.get('citation'):
-                                with st.expander("📚 Citation", expanded=False):
-                                    st.markdown(ins.get('citation'))
-            else:
-                st.markdown(response if isinstance(response, str) else str(response))
+                    st.error(f"❌ Failed to save file: {err}")
+    
+    st.divider()
+    
+    # Refresh Section - Simple and clear
+    st.markdown("### 🔄 Refresh Data")
+    st.caption("If you've updated the Excel file externally, click below to reload the data.")
+    
+    if st.button("🔄 Refresh Data Now", type="primary", use_container_width=True, help="Clear cache and reload from file"):
+        try:
+            load_dataframe.clear()
+            st.success("✅ Cache cleared! Reloading...")
+            st.rerun()
+        except Exception as e:
+            logger.error(f"Failed to refresh data cache: {e}", exc_info=True)
+            st.error("❌ Failed to refresh data. Please check the logs.")
 
 
 def render_manual_search_page(agent, df):
@@ -887,17 +856,17 @@ def main():
         logger.error("Agent initialization failed")
         return
     
+    # Resolve Excel path early
+    if Config:
+        excel_path = Config.EXCEL_FILE_PATH
+        sheet_name = Config.EXCEL_SHEET_NAME
+    else:
+        excel_path = "measurement_instruments.xlsx"
+        sheet_name = "Measurement Instruments"
+    excel_path = resolve_excel_path(excel_path)
+    
+    # Load data first
     try:
-        if Config:
-            excel_path = Config.EXCEL_FILE_PATH
-            sheet_name = Config.EXCEL_SHEET_NAME
-        else:
-            excel_path = "measurement_instruments.xlsx"
-            sheet_name = "Measurement Instruments"
-        
-        # Resolve path relative to project root
-        excel_path = resolve_excel_path(excel_path)
-        
         df = load_dataframe(excel_path, sheet_name)
     except FileNotFoundError:
         st.error(f"❌ Data file not found: {excel_path}")
@@ -908,26 +877,22 @@ def main():
         logger.error(f"Error loading dataframe: {e}", exc_info=True)
         return
 
-    # Enhanced sidebar navigation
+    # Sidebar: Navigation
     st.sidebar.markdown("### 🧭 Navigation")
     page = st.sidebar.radio(
         "Choose a page",
-        ["💬 Chat", "🔍 Manual Search"],
+        ["💬 Chat", "🔍 Manual Search", "📂 Data Management"],
         key="nav_radio",
         label_visibility="collapsed"
     )
     
-    # Sidebar info
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(f"**📚 Database:** {len(df)} instruments")
-    if 'Outcome Domain' in df.columns:
-        domains = df['Outcome Domain'].dropna().unique()
-        st.sidebar.markdown(f"**📁 Domains:** {len(domains)}")
-    
+    # Route to appropriate page
     if page == "💬 Chat":
         render_chat_page(agent, df)
-    else:
+    elif page == "🔍 Manual Search":
         render_manual_search_page(agent, df)
+    elif page == "📂 Data Management":
+        render_data_management_page(df, excel_path)
 
 
 if __name__ == "__main__":

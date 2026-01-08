@@ -25,10 +25,10 @@ class Config:
     EXCEL_FILE_PATH: str = os.getenv("EXCEL_FILE_PATH", "measurement_instruments.xlsx")
     EXCEL_SHEET_NAME: str = os.getenv("EXCEL_SHEET_NAME", "Measurement Instruments")
     
-    # API Configuration
-    HF_TOKEN: Optional[str] = None
-    HF_BASE_URL: str = os.getenv("HF_BASE_URL", "https://router.huggingface.co/v1")
-    HF_MODEL: str = os.getenv("HF_MODEL", "moonshotai/Kimi-K2-Instruct-0905")
+    # LLM / API Configuration (neutral names so we can use Hugging Face, Llama, etc.)
+    LLM_API_KEY: Optional[str] = None
+    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "https://router.huggingface.co/v1")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "moonshotai/Kimi-K2-Instruct-0905")
     
     # Application Settings
     MAX_RESULTS: int = int(os.getenv("MAX_RESULTS", "8"))
@@ -51,14 +51,14 @@ class Config:
         """
         errors = []
         
-        # Validate HF_TOKEN
-        hf_token = os.getenv("HF_TOKEN")
-        if isinstance(hf_token, str):
-            hf_token = hf_token.strip().strip('"\'')
-        cls.HF_TOKEN = hf_token
+        # Validate LLM_API_KEY (we keep reading HF_TOKEN too for backward compatibility)
+        api_key = os.getenv("LLM_API_KEY") or os.getenv("HF_TOKEN")
+        if isinstance(api_key, str):
+            api_key = api_key.strip().strip('"\'')
+        cls.LLM_API_KEY = api_key
         
-        if not cls.HF_TOKEN:
-            errors.append("HF_TOKEN environment variable is required")
+        if not cls.LLM_API_KEY:
+            errors.append("LLM_API_KEY (or legacy HF_TOKEN) environment variable is required")
         
         # Validate Excel file exists
         if not os.path.exists(cls.EXCEL_FILE_PATH):
@@ -92,6 +92,6 @@ class Config:
             "max_results": cls.MAX_RESULTS,
             "semantic_search_enabled": cls.SEMANTIC_SEARCH_ENABLED,
             "caching_enabled": cls.ENABLE_CACHING,
-            "hf_token_set": bool(cls.HF_TOKEN),
+            "llm_api_key_set": bool(cls.LLM_API_KEY),
         }
 

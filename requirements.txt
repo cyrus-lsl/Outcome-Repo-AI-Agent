@@ -6,3 +6,4 @@ openpyxl
 sentence-transformers
 numpy
 scikit-learn
+requests

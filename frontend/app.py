@@ -284,6 +284,101 @@ What measurement instrument would you like to find?""",
         except Exception as e:
             logger.warning(f"Error filtering by item count: {e}")
 
+    # Try semantic search first (FAST PATH) if agent is available
+    if agent is not None:
+        try:
+            # Use semantic search with filtered dataframe
+            search_results = agent.search(
+                query=prompt,
+                max_results=max_results,
+                df_override=df_for_model,
+                use_semantic=True
+            )
+            
+            # If semantic search returned results, convert to expected format
+            if search_results:
+                matched = []
+                for r in search_results:
+                    instrument = r.get('instrument')
+                    if instrument is None:
+                        continue
+                    
+                    matched.append({
+                        'name': instrument.get('Measurement Instrument', ''),
+                        'acronym': instrument.get('Acronym', ''),
+                        'purpose': instrument.get('Purpose', ''),
+                        'target': instrument.get('Target Group(s)', ''),
+                        'domain': instrument.get('Outcome Domain', ''),
+                        'no_of_items': instrument.get('No. of Questions / Statements', ''),
+                        'sample_q1': instrument.get('Sample Question / Statement - 1', ''),
+                        'sample_q2': instrument.get('Sample Question / Statement - 2', ''),
+                        'sample_q3': instrument.get('Sample Question / Statement - 3', ''),
+                        'scale': instrument.get('Scale', ''),
+                        'scoring': instrument.get('Scoring', ''),
+                        'validated': instrument.get('Validated in Hong Kong', ''),
+                        'programme_level': instrument.get('Programme-level metric?', ''),
+                        'download_eng': instrument.get('Download (Eng)', ''),
+                        'download_chi': instrument.get('Download (Chi)', ''),
+                        'citation': instrument.get('Citation', ''),
+                        'semantic_score': r.get('semantic_score')
+                    })
+                
+                # Apply post-filters to semantic search results
+                filtered = matched
+                if want_validated_hk:
+                    filtered = [ins for ins in filtered if _validated_in_hk_text(ins.get('validated', ''))]
+                    if not filtered:
+                        return {'text': 'No instruments validated in Hong Kong found matching the query.', 'matched': [], 'unknown': []}
+                
+                if max_items is not None or min_items is not None:
+                    def parse_count(x):
+                        if not x or pd.isna(x):
+                            return None
+                        if match := re.search(r'(\d+)', str(x).strip()):
+                            return int(match.group(1))
+                        return None
+                    
+                    item_filtered = [ins for ins in filtered 
+                                    if (count := parse_count(ins.get('no_of_items', ''))) is not None
+                                    and (max_items is None or count <= max_items)
+                                    and (min_items is None or count >= min_items)]
+                    
+                    if item_filtered:
+                        filtered = item_filtered
+                    else:
+                        constraints = []
+                        if max_items is not None:
+                            constraints.append(f"maximum {max_items} items")
+                        if min_items is not None:
+                            constraints.append(f"minimum {min_items} items")
+                        return {'text': f'No instruments found with {" and ".join(constraints)}. Please try adjusting your search criteria.', 
+                               'matched': [], 'unknown': []}
+                
+                # Format response for semantic search results
+                out_parts = []
+                for ins in filtered:
+                    part = f"**{ins['name']}" + (f" ({ins['acronym']})" if ins['acronym'] else '') + f"** — {ins['domain']}\n\n"
+                    part += f"**Purpose:** {ins['purpose']}  \n**Target:** {ins['target']}  \n"
+                    if ins['no_of_items']:
+                        part += f"**Items:** {ins['no_of_items']}  \n"
+                    if ins['scale']:
+                        part += f"**Scale:** {ins['scale']}  \n"
+                    if ins['validated']:
+                        part += f"**Validated in HK:** {ins['validated']}  \n"
+                    if ins['programme_level']:
+                        part += f"**Programme-level metric?:** {ins.get('programme_level')}  \n"
+                    if ins['scoring']:
+                        part += f"**Scoring:** {ins['scoring']}  \n"
+                    if ins.get('semantic_score'):
+                        part += f"**Relevance Score:** {ins['semantic_score']:.2f}  \n"
+                    out_parts.append(part)
+                
+                response_text = f"Found {len(filtered)} matching instrument{'s' if len(filtered) != 1 else ''}:\n\n" + "\n---\n\n".join(out_parts)
+                return {'text': response_text, 'matched': filtered, 'unknown': []}
+        except Exception as e:
+            # If semantic search fails, log and continue to LLM fallback
+            logger.warning(f"Semantic search failed, falling back to LLM: {e}", exc_info=True)
+
     inst_lines = []
     instrument_names = []
     for _, row in df_for_model.iterrows():

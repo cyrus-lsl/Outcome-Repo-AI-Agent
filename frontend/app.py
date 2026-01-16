@@ -284,14 +284,30 @@ What measurement instrument would you like to find?""",
     )
 
     try:
+        # Check if prompt is too large (some LLMs have token limits)
+        prompt_length = len(user_message) + len(system_message)
+        num_instruments = len(inst_lines)
+        logger.info(f"Sending {num_instruments} instruments to LLM (prompt length: {prompt_length} chars)")
+        if prompt_length > 100000:  # Rough estimate: ~100k chars might be too large
+            logger.warning(f"Prompt is very large ({prompt_length} chars, {num_instruments} instruments), may cause issues")
+        
         completion = client.chat.completions.create(
             model=model_name, messages=[{"role": "system", "content": system_message}, {"role": "user", "content": user_message}],
             max_tokens=200, temperature=0.0
         )
         llm_text = completion.choices[0].message.content
     except Exception as e:
-        logger.error(f"LLM API call failed: {e}", exc_info=True)
-        return {'text': "I encountered an error. Please try again.", 'matched': [], 'unknown': []}
+        error_msg = str(e)
+        logger.error(f"LLM API call failed: {error_msg}", exc_info=True)
+        # Provide more helpful error message
+        if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            return {'text': "The request took too long. The dataset might be too large. Please try a more specific query.", 'matched': [], 'unknown': []}
+        elif "rate limit" in error_msg.lower() or "429" in error_msg:
+            return {'text': "Rate limit exceeded. Please wait a moment and try again.", 'matched': [], 'unknown': []}
+        elif "401" in error_msg or "unauthorized" in error_msg.lower():
+            return {'text': "Authentication error. Please check your LLM API key configuration.", 'matched': [], 'unknown': []}
+        else:
+            return {'text': f"I encountered an error: {error_msg[:200]}. Please try again or check the logs for details.", 'matched': [], 'unknown': []}
 
     import json
     try:

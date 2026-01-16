@@ -590,6 +590,30 @@ def _display_response(response, matched):
                     if badge_html:
                         st.markdown(badge_html, unsafe_allow_html=True)
                     
+                    # Confidence score
+                    if ins.get('confidence_score') is not None:
+                        confidence = ins['confidence_score']
+                        # Color code: 80+ = excellent, 60-79 = good, 40-59 = fair, <40 = low
+                        if confidence >= 80:
+                            confidence_label = "🟢 Excellent match"
+                            confidence_color = "#22c55e"  # Green
+                        elif confidence >= 60:
+                            confidence_label = "🟡 Good match"
+                            confidence_color = "#eab308"  # Yellow
+                        elif confidence >= 40:
+                            confidence_label = "🟠 Fair match"
+                            confidence_color = "#f97316"  # Orange
+                        else:
+                            confidence_label = "🔴 Low match"
+                            confidence_color = "#ef4444"  # Red
+                        
+                        st.markdown(
+                            f'<div style="background-color: {confidence_color}20; padding: 0.5rem; border-radius: 0.5rem; border-left: 4px solid {confidence_color}; margin: 0.5rem 0;">'
+                            f'<strong>{confidence_label}</strong> (Confidence: {confidence:.0f}/100)'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+                    
                     st.markdown("---")
                     
                     # Purpose

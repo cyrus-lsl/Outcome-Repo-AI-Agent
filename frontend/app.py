@@ -267,10 +267,12 @@ What measurement instrument would you like to find?""",
     for _, row in df.iterrows():
         name = str(row.get('Measurement Instrument', '')).strip()
         if name:
-            domain = str(row.get('Outcome Domain', '')).strip()[:30]
-            target = str(row.get('Target Group(s)', '')).strip()[:30]
+            domain = str(row.get('Outcome Domain', '')).strip()[:50]
+            target = str(row.get('Target Group(s)', '')).strip()[:50]
+            purpose = str(row.get('Purpose', '')).strip()[:100]  # Add Purpose - crucial for matching!
             items = str(row.get('No. of Questions / Statements', '')).strip() or 'N/A'
-            inst_lines.append(f"{name}|{domain}|{target}|{items}")
+            # Format: Name|Domain|Target|Purpose|Items
+            inst_lines.append(f"{name}|{domain}|{target}|{purpose}|{items}")
             instrument_names.append(name)
 
     item_constraint_note = ""
@@ -282,13 +284,13 @@ What measurement instrument would you like to find?""",
         if min_items is not None:
             item_constraint_note += f"IMPORTANT: User requested at least {min_items} items.\n"
     
-    system_message = f"Select instrument NAMES from database. Format: Name|Domain|Target|Items. Return JSON array with up to {max_results} names, or [] if no matches. Do NOT invent names."
+    system_message = f"Select instruments from database. Format: Name|Domain|Target|Purpose|Items. Analyze the Purpose field to understand what each instrument measures. Return JSON array of objects with 'name' and 'confidence' (0-100) indicating how suitable each instrument is. Return up to {max_results} instruments, or [] if no matches. Do NOT invent names."
     user_message = (
         f"DB: {chr(10).join(inst_lines)}\n\nQuery: {prompt}\n"
         + ("[HK-validated only]\n" if want_validated_hk else "")
         + ("[Programme-level only]\n" if prog_only else "")
         + item_constraint_note
-        + f"Return JSON array of matching instrument names (max {max_results})."
+        + f"Return JSON array of objects: [{{\"name\": \"Instrument Name\", \"confidence\": 85}}, ...]. Confidence (0-100) indicates how well the instrument matches the query. Higher = more suitable. Max {max_results} instruments."
     )
 
     try:
@@ -301,7 +303,7 @@ What measurement instrument would you like to find?""",
         
         completion = client.chat.completions.create(
             model=model_name, messages=[{"role": "system", "content": system_message}, {"role": "user", "content": user_message}],
-            max_tokens=200, temperature=0.0
+            max_tokens=300, temperature=0.0  # Increased for confidence scores
         )
         llm_text = completion.choices[0].message.content
     except Exception as e:
@@ -349,14 +351,36 @@ What measurement instrument would you like to find?""",
     
     cleaned_text = cleaned_text.strip()
     
+    # Initialize confidence_scores dictionary
+    confidence_scores = {}
+    
     try:
         parsed = json.loads(cleaned_text)
-        names = [str(x).strip() for x in parsed if x] if isinstance(parsed, list) else []
-        logger.debug(f"Successfully parsed JSON: {len(names)} items")
+        # Handle both formats: array of strings or array of objects with name/confidence
+        names = []
+        
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    # New format: {"name": "...", "confidence": 85}
+                    name = str(item.get('name', '')).strip()
+                    confidence = item.get('confidence', None)
+                    if name:
+                        names.append(name)
+                        if confidence is not None:
+                            confidence_scores[name.lower()] = float(confidence)
+                elif isinstance(item, str):
+                    # Old format: just string names
+                    name = item.strip()
+                    if name:
+                        names.append(name)
+        
+        logger.debug(f"Successfully parsed JSON: {len(names)} items, {len(confidence_scores)} with confidence scores")
     except json.JSONDecodeError as e:
         logger.warning(f"JSON parsing failed: {e}, trying fallback parsing. Text preview: {cleaned_text[:200]}")
         # Fallback: try to extract from lines, removing quotes and brackets
         names = []
+        confidence_scores = {}  # No confidence scores in fallback parsing
         for line in cleaned_text.split('\n'):
             line = line.strip()
             # Skip empty lines, brackets, commas, markdown markers
@@ -371,20 +395,32 @@ What measurement instrument would you like to find?""",
     except Exception as e:
         logger.error(f"Unexpected error parsing LLM response: {e}")
         names = []
+        confidence_scores = {}  # Initialize if not already set
     
-    # Extract instrument name if LLM returned formatted strings (Name|Domain|Target|Items)
+    # Extract instrument name if LLM returned formatted strings (Name|Domain|Target|Purpose|Items)
     # Take only the part before the first pipe character
     cleaned_names = []
+    cleaned_confidence = {}
     for name in names:
         # If it contains a pipe, extract just the name part (before first |)
         if '|' in name:
             cleaned_name = name.split('|')[0].strip()
             cleaned_names.append(cleaned_name)
+            # Preserve confidence score if available
+            if cleaned_name.lower() in confidence_scores:
+                cleaned_confidence[cleaned_name.lower()] = confidence_scores[cleaned_name.lower()]
         else:
-            cleaned_names.append(name.strip())
+            cleaned_name = name.strip()
+            cleaned_names.append(cleaned_name)
+            # Preserve confidence score if available
+            if cleaned_name.lower() in confidence_scores:
+                cleaned_confidence[cleaned_name.lower()] = confidence_scores[cleaned_name.lower()]
     
     names = cleaned_names
+    confidence_scores = cleaned_confidence
     logger.info(f"LLM returned {len(names)} instrument names: {names[:5]}{'...' if len(names) > 5 else ''}")
+    if confidence_scores:
+        logger.info(f"Confidence scores: {dict(list(confidence_scores.items())[:3])}")
 
     matched = []
     unknown = []
@@ -400,8 +436,11 @@ What measurement instrument would you like to find?""",
             match = df[df['Measurement Instrument'].str.contains(re.escape(nm), case=False, na=False)]
         if not match.empty and len(matched) < max_results:
             r = match.iloc[0]
+            inst_name = r.get('Measurement Instrument', '')
+            # Get confidence score if available
+            confidence = confidence_scores.get(inst_name.lower(), None)
             matched.append({
-                'name': r.get('Measurement Instrument', ''),
+                'name': inst_name,
                 'acronym': r.get('Acronym', ''),
                 'purpose': r.get('Purpose', ''),
                 'target': r.get('Target Group(s)', ''),
@@ -417,7 +456,8 @@ What measurement instrument would you like to find?""",
                 'download_eng': r.get('Download (Eng)', ''),
                 'download_chi': r.get('Download (Chi)', ''),
                 'citation': r.get('Citation', ''),
-                'semantic_score': None
+                'semantic_score': None,
+                'confidence_score': confidence  # Add confidence score from LLM (0-100)
             })
 
     if unknown:
@@ -470,9 +510,28 @@ What measurement instrument would you like to find?""",
             return {'text': f'Found {before_count} matching instrument(s), but none have {" and ".join(constraints)}. Please try adjusting your search criteria or removing the item count constraint.', 
                    'matched': [], 'unknown': unknown}
 
+    # Sort by confidence score (highest first) if available
+    has_confidence = any(ins.get('confidence_score') is not None for ins in filtered)
+    if has_confidence:
+        filtered.sort(key=lambda x: x.get('confidence_score') or 0, reverse=True)
+        logger.info(f"Sorted {len(filtered)} results by confidence score")
+
     out_parts = []
     for ins in filtered:
         part = f"**{ins['name']}" + (f" ({ins['acronym']})" if ins['acronym'] else '') + f"** — {ins['domain']}\n\n"
+        # Add confidence score if available
+        if ins.get('confidence_score') is not None:
+            confidence = ins['confidence_score']
+            # Color code: 80+ = excellent, 60-79 = good, 40-59 = fair, <40 = low
+            if confidence >= 80:
+                confidence_label = "🟢 Excellent match"
+            elif confidence >= 60:
+                confidence_label = "🟡 Good match"
+            elif confidence >= 40:
+                confidence_label = "🟠 Fair match"
+            else:
+                confidence_label = "🔴 Low match"
+            part += f"**{confidence_label}** (Confidence: {confidence:.0f}/100)  \n"
         part += f"**Purpose:** {ins['purpose']}  \n**Target:** {ins['target']}  \n"
         if ins['no_of_items']:
             part += f"**Items:** {ins['no_of_items']}  \n"

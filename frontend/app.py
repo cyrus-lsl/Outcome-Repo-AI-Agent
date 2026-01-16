@@ -146,12 +146,16 @@ def get_llm_config_with_fallback():
     
     # Check if Ollama is reachable
     try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        response = requests.get("http://localhost:11434/api/tags", timeout=5)
         if response.status_code == 200:
-            logger.info("✓ Using local Ollama (llama3)")
+            logger.info("✓ Using local Ollama (llama3.2:3b)")
             return ollama_base, ollama_model, "dummy-token"
-    except Exception:
-        pass
+    except requests.exceptions.Timeout:
+        logger.warning("Ollama check timed out (5s), may not be running")
+    except requests.exceptions.ConnectionError:
+        logger.warning("Ollama not reachable at localhost:11434")
+    except Exception as e:
+        logger.warning(f"Ollama check failed: {type(e).__name__}")
     
     # Fall back to configured LLM
     if fallback_base != ollama_base or fallback_model != ollama_model:
@@ -222,6 +226,7 @@ What measurement instrument would you like to find?""",
 
     # Parse item count constraints
     max_items = min_items = None
+    logger.info(f"Query: '{prompt}'. Parsed filters: HK-validated={want_validated_hk}, prog_only={prog_only}")
     try:
         max_patterns = [
             r'(?:not\s+more\s+than|maximum|max|at\s+most|less\s+than|fewer\s+than|under|below)\s+(\d+)\s*(?:items?|questions?|statements?)?',
@@ -244,6 +249,9 @@ What measurement instrument would you like to find?""",
         if not max_items and not min_items:
             if match := re.search(r'(?:exactly|precisely|exactly\s+)?(\d+)\s*(?:items?|questions?|statements?)(?:\s+only)?', prompt_l):
                 max_items = min_items = int(match.group(1))
+        
+        if max_items is not None or min_items is not None:
+            logger.info(f"Parsed item count constraints: max_items={max_items}, min_items={min_items}")
     except Exception as e:
         logger.warning(f"Error parsing item count: {e}")
 
@@ -321,6 +329,8 @@ What measurement instrument would you like to find?""",
         names = [str(x).strip() for x in parsed if x] if isinstance(parsed, list) else []
     except Exception:
         names = [line.strip(' -') for line in llm_text.split('\n') if line.strip()]
+    
+    logger.info(f"LLM returned {len(names)} instrument names: {names[:5]}{'...' if len(names) > 5 else ''}")
 
     matched = []
     unknown = []
@@ -356,15 +366,23 @@ What measurement instrument would you like to find?""",
                 'semantic_score': None
             })
 
-    if unknown and os.getenv('DEBUG_HF') == '1':
-        logger.debug(f'Model returned names not in spreadsheet: {unknown}')
+    if unknown:
+        logger.warning(f'LLM returned {len(unknown)} names not in database: {unknown[:3]}{"..." if len(unknown) > 3 else ""}')
 
+    logger.info(f"Matched {len(matched)} instruments from LLM response")
+    
     if not matched:
+        if names:
+            return {'text': f'LLM found {len(names)} potential matches, but none matched the database. This might indicate a data mismatch. Unknown names: {", ".join(unknown[:5])}.', 'matched': [], 'unknown': unknown}
         return {'text': 'No matching instruments found. Please try a more specific query.', 'matched': [], 'unknown': unknown}
 
     filtered = matched
+    logger.info(f"Starting with {len(filtered)} matched instruments")
+    
     if want_validated_hk:
+        before_count = len(filtered)
         filtered = [ins for ins in filtered if _validated_in_hk_text(ins.get('validated', ''))]
+        logger.info(f"After HK validation filter: {len(filtered)}/{before_count} instruments remain")
         if not filtered:
             return {'text': 'No instruments validated in Hong Kong found matching the query.', 'matched': [], 'unknown': unknown}
 
@@ -376,10 +394,16 @@ What measurement instrument would you like to find?""",
                 return int(match.group(1))
             return None
         
+        before_count = len(filtered)
+        item_counts = [parse_count(ins.get('no_of_items', '')) for ins in filtered]
+        logger.info(f"Item count filter: max={max_items}, min={min_items}. Instrument counts: {[c for c in item_counts[:5] if c is not None]}{'...' if len(item_counts) > 5 else ''}")
+        
         item_filtered = [ins for ins in filtered 
                         if (count := parse_count(ins.get('no_of_items', ''))) is not None
                         and (max_items is None or count <= max_items)
                         and (min_items is None or count >= min_items)]
+        
+        logger.info(f"After item count filter: {len(item_filtered)}/{before_count} instruments remain")
         
         if item_filtered:
             filtered = item_filtered
@@ -389,7 +413,7 @@ What measurement instrument would you like to find?""",
                 constraints.append(f"maximum {max_items} items")
             if min_items is not None:
                 constraints.append(f"minimum {min_items} items")
-            return {'text': f'No instruments found with {" and ".join(constraints)}. Please try adjusting your search criteria.', 
+            return {'text': f'Found {before_count} matching instrument(s), but none have {" and ".join(constraints)}. Please try adjusting your search criteria or removing the item count constraint.', 
                    'matched': [], 'unknown': unknown}
 
     out_parts = []

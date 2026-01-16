@@ -324,11 +324,53 @@ What measurement instrument would you like to find?""",
             return {'text': f"I encountered an error ({error_type}): {error_msg[:200]}. Please try again or check the logs for details.", 'matched': [], 'unknown': []}
 
     import json
+    import re
+    
+    # Clean up LLM response - remove markdown code blocks if present
+    cleaned_text = llm_text.strip()
+    
+    # Remove markdown code blocks (```json ... ``` or ``` ... ```)
+    # Find content between first ``` and last ```
+    if '```' in cleaned_text:
+        first_backticks = cleaned_text.find('```')
+        if first_backticks >= 0:
+            # Find the newline after the opening ```
+            after_open = cleaned_text.find('\n', first_backticks)
+            if after_open > 0:
+                cleaned_text = cleaned_text[after_open+1:]
+            else:
+                # No newline, just remove the ``` part
+                cleaned_text = cleaned_text[first_backticks+3:]
+        
+        # Find and remove closing ```
+        last_backticks = cleaned_text.rfind('```')
+        if last_backticks > 0:
+            cleaned_text = cleaned_text[:last_backticks]
+    
+    cleaned_text = cleaned_text.strip()
+    
     try:
-        parsed = json.loads(llm_text)
+        parsed = json.loads(cleaned_text)
         names = [str(x).strip() for x in parsed if x] if isinstance(parsed, list) else []
-    except Exception:
-        names = [line.strip(' -') for line in llm_text.split('\n') if line.strip()]
+        logger.debug(f"Successfully parsed JSON: {len(names)} items")
+    except json.JSONDecodeError as e:
+        logger.warning(f"JSON parsing failed: {e}, trying fallback parsing. Text preview: {cleaned_text[:200]}")
+        # Fallback: try to extract from lines, removing quotes and brackets
+        names = []
+        for line in cleaned_text.split('\n'):
+            line = line.strip()
+            # Skip empty lines, brackets, commas, markdown markers
+            if not line or line in ['[', ']', ',', '```json', '```']:
+                continue
+            # Remove JSON array brackets and quotes from start/end
+            line = re.sub(r'^[\[\],"\']+', '', line)
+            line = re.sub(r'[\[\],"\']+$', '', line)
+            line = line.strip().strip('"\'')
+            if line and line not in ['[', ']', ',']:
+                names.append(line)
+    except Exception as e:
+        logger.error(f"Unexpected error parsing LLM response: {e}")
+        names = []
     
     # Extract instrument name if LLM returned formatted strings (Name|Domain|Target|Items)
     # Take only the part before the first pipe character

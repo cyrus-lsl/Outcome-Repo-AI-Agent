@@ -531,7 +531,7 @@ What measurement instrument would you like to find?""",
                 confidence_label = "🟠 Fair match"
             else:
                 confidence_label = "🔴 Low match"
-            part += f"**{confidence_label}** (Confidence: {confidence:.0f}/100)  \n"
+            part += f"**{confidence_label}** (Score: {confidence:.0f}/100)  \n"
         part += f"**Purpose:** {ins['purpose']}  \n**Target:** {ins['target']}  \n"
         if ins['no_of_items']:
             part += f"**Items:** {ins['no_of_items']}  \n"
@@ -609,7 +609,7 @@ def _display_response(response, matched):
                         
                         st.markdown(
                             f'<div style="background-color: {confidence_color}20; padding: 0.5rem; border-radius: 0.5rem; border-left: 4px solid {confidence_color}; margin: 0.5rem 0;">'
-                            f'<strong>{confidence_label}</strong> (Confidence: {confidence:.0f}/100)'
+                            f'<strong>{confidence_label}</strong> (Score: {confidence:.0f}/100)'
                             f'</div>',
                             unsafe_allow_html=True
                         )

@@ -163,9 +163,9 @@ def get_llm_config_with_fallback():
 
 
 def call_llm_chat(prompt, df, validated_only=False, prog_only=False, max_results=6, agent=None):
-    """Call the configured LLM for responses with semantic search enhancement.
+    """Call the configured LLM for responses.
 
-    The function uses semantic search first (if available), then uses the LLM to refine results.
+    Uses LLM to search and match instruments from the database.
     """
     prompt = sanitize_input(prompt, max_length=Config.MAX_QUERY_LENGTH if Config else 500)
     if not prompt:
@@ -253,135 +253,10 @@ What measurement instrument would you like to find?""",
             return False
         return s.startswith('yes') or ('validated' in s and 'hong' in s) or (('hong' in s or 'hk' in s) and ('valid' in s or 'develop' in s or 'refer' in s))
 
-    df_for_model = df
-    if want_validated_hk and 'Validated in Hong Kong' in df.columns:
-        try:
-            df_for_model = df[df['Validated in Hong Kong'].apply(_validated_in_hk_text)]
-        except Exception:
-            pass
-    if prog_only and 'Programme-level metric?' in df_for_model.columns:
-        try:
-            df_for_model = df_for_model[df_for_model['Programme-level metric?'].astype(str).str.strip().str.lower().isin(['yes','y','true'])]
-        except Exception:
-            pass
-
-    if (max_items is not None or min_items is not None) and 'No. of Questions / Statements' in df_for_model.columns:
-        try:
-            def parse_count(x):
-                if pd.isna(x):
-                    return None
-                if match := re.search(r'(\d+)', str(x).strip()):
-                    return int(match.group(1))
-                return None
-            
-            item_counts = df_for_model['No. of Questions / Statements'].apply(parse_count)
-            mask = pd.Series([True] * len(df_for_model), index=df_for_model.index)
-            if max_items is not None:
-                mask &= (item_counts <= max_items) | (item_counts.isna())
-            if min_items is not None:
-                mask &= (item_counts >= min_items) | (item_counts.isna())
-            df_for_model = df_for_model[mask]
-        except Exception as e:
-            logger.warning(f"Error filtering by item count: {e}")
-
-    # Try semantic search first (FAST PATH) if agent is available
-    if agent is not None:
-        try:
-            # Use semantic search with filtered dataframe
-            search_results = agent.search(
-                query=prompt,
-                max_results=max_results,
-                df_override=df_for_model,
-                use_semantic=True
-            )
-            
-            # If semantic search returned results, convert to expected format
-            if search_results:
-                matched = []
-                for r in search_results:
-                    instrument = r.get('instrument')
-                    if instrument is None:
-                        continue
-                    
-                    matched.append({
-                        'name': instrument.get('Measurement Instrument', ''),
-                        'acronym': instrument.get('Acronym', ''),
-                        'purpose': instrument.get('Purpose', ''),
-                        'target': instrument.get('Target Group(s)', ''),
-                        'domain': instrument.get('Outcome Domain', ''),
-                        'no_of_items': instrument.get('No. of Questions / Statements', ''),
-                        'sample_q1': instrument.get('Sample Question / Statement - 1', ''),
-                        'sample_q2': instrument.get('Sample Question / Statement - 2', ''),
-                        'sample_q3': instrument.get('Sample Question / Statement - 3', ''),
-                        'scale': instrument.get('Scale', ''),
-                        'scoring': instrument.get('Scoring', ''),
-                        'validated': instrument.get('Validated in Hong Kong', ''),
-                        'programme_level': instrument.get('Programme-level metric?', ''),
-                        'download_eng': instrument.get('Download (Eng)', ''),
-                        'download_chi': instrument.get('Download (Chi)', ''),
-                        'citation': instrument.get('Citation', ''),
-                        'semantic_score': r.get('semantic_score')
-                    })
-                
-                # Apply post-filters to semantic search results
-                filtered = matched
-                if want_validated_hk:
-                    filtered = [ins for ins in filtered if _validated_in_hk_text(ins.get('validated', ''))]
-                    if not filtered:
-                        return {'text': 'No instruments validated in Hong Kong found matching the query.', 'matched': [], 'unknown': []}
-                
-                if max_items is not None or min_items is not None:
-                    def parse_count(x):
-                        if not x or pd.isna(x):
-                            return None
-                        if match := re.search(r'(\d+)', str(x).strip()):
-                            return int(match.group(1))
-                        return None
-                    
-                    item_filtered = [ins for ins in filtered 
-                                    if (count := parse_count(ins.get('no_of_items', ''))) is not None
-                                    and (max_items is None or count <= max_items)
-                                    and (min_items is None or count >= min_items)]
-                    
-                    if item_filtered:
-                        filtered = item_filtered
-                    else:
-                        constraints = []
-                        if max_items is not None:
-                            constraints.append(f"maximum {max_items} items")
-                        if min_items is not None:
-                            constraints.append(f"minimum {min_items} items")
-                        return {'text': f'No instruments found with {" and ".join(constraints)}. Please try adjusting your search criteria.', 
-                               'matched': [], 'unknown': []}
-                
-                # Format response for semantic search results
-                out_parts = []
-                for ins in filtered:
-                    part = f"**{ins['name']}" + (f" ({ins['acronym']})" if ins['acronym'] else '') + f"** — {ins['domain']}\n\n"
-                    part += f"**Purpose:** {ins['purpose']}  \n**Target:** {ins['target']}  \n"
-                    if ins['no_of_items']:
-                        part += f"**Items:** {ins['no_of_items']}  \n"
-                    if ins['scale']:
-                        part += f"**Scale:** {ins['scale']}  \n"
-                    if ins['validated']:
-                        part += f"**Validated in HK:** {ins['validated']}  \n"
-                    if ins['programme_level']:
-                        part += f"**Programme-level metric?:** {ins.get('programme_level')}  \n"
-                    if ins['scoring']:
-                        part += f"**Scoring:** {ins['scoring']}  \n"
-                    if ins.get('semantic_score'):
-                        part += f"**Relevance Score:** {ins['semantic_score']:.2f}  \n"
-                    out_parts.append(part)
-                
-                response_text = f"Found {len(filtered)} matching instrument{'s' if len(filtered) != 1 else ''}:\n\n" + "\n---\n\n".join(out_parts)
-                return {'text': response_text, 'matched': filtered, 'unknown': []}
-        except Exception as e:
-            # If semantic search fails, log and continue to LLM fallback
-            logger.warning(f"Semantic search failed, falling back to LLM: {e}", exc_info=True)
-
+    # Send entire dataset to LLM (no pre-filtering)
     inst_lines = []
     instrument_names = []
-    for _, row in df_for_model.iterrows():
+    for _, row in df.iterrows():
         name = str(row.get('Measurement Instrument', '')).strip()
         if name:
             domain = str(row.get('Outcome Domain', '')).strip()[:30]
@@ -434,9 +309,9 @@ What measurement instrument would you like to find?""",
             unknown.append(nm)
             continue
         try:
-            match = df_for_model[df_for_model['Measurement Instrument'].str.contains(nm, case=False, na=False, regex=False)]
+            match = df[df['Measurement Instrument'].str.contains(nm, case=False, na=False, regex=False)]
         except TypeError:
-            match = df_for_model[df_for_model['Measurement Instrument'].str.contains(re.escape(nm), case=False, na=False)]
+            match = df[df['Measurement Instrument'].str.contains(re.escape(nm), case=False, na=False)]
         if not match.empty and len(matched) < max_results:
             r = match.iloc[0]
             matched.append({

@@ -298,16 +298,22 @@ What measurement instrument would you like to find?""",
         llm_text = completion.choices[0].message.content
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"LLM API call failed: {error_msg}", exc_info=True)
-        # Provide more helpful error message
-        if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+        error_type = type(e).__name__
+        logger.error(f"LLM API call failed: {error_type}: {error_msg}", exc_info=True)
+        
+        # Provide more helpful error message based on error type
+        if "APIConnectionError" in error_type or "ConnectError" in error_type or "connection" in error_msg.lower() or "cannot assign requested address" in error_msg.lower():
+            return {'text': "Connection error: Unable to reach the LLM service. Please check:\n- Your LLM service is running and accessible\n- Network connectivity\n- LLM_BASE_URL configuration is correct\n\nIf using Ollama locally, make sure it's running: `ollama serve`", 'matched': [], 'unknown': []}
+        elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower() or "Timeout" in error_type:
             return {'text': "The request took too long. The dataset might be too large. Please try a more specific query.", 'matched': [], 'unknown': []}
-        elif "rate limit" in error_msg.lower() or "429" in error_msg:
+        elif "rate limit" in error_msg.lower() or "429" in error_msg or "RateLimitError" in error_type:
             return {'text': "Rate limit exceeded. Please wait a moment and try again.", 'matched': [], 'unknown': []}
-        elif "401" in error_msg or "unauthorized" in error_msg.lower():
+        elif "401" in error_msg or "unauthorized" in error_msg.lower() or "AuthenticationError" in error_type:
             return {'text': "Authentication error. Please check your LLM API key configuration.", 'matched': [], 'unknown': []}
+        elif "APIError" in error_type:
+            return {'text': f"API error: {error_msg[:200]}. Please check your LLM configuration and try again.", 'matched': [], 'unknown': []}
         else:
-            return {'text': f"I encountered an error: {error_msg[:200]}. Please try again or check the logs for details.", 'matched': [], 'unknown': []}
+            return {'text': f"I encountered an error ({error_type}): {error_msg[:200]}. Please try again or check the logs for details.", 'matched': [], 'unknown': []}
 
     import json
     try:

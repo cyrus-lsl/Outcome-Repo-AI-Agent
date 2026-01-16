@@ -324,7 +324,7 @@ What measurement instrument would you like to find?""",
             return {'text': f"I encountered an error ({error_type}): {error_msg[:200]}. Please try again or check the logs for details.", 'matched': [], 'unknown': []}
 
     import json
-    import re
+    # Note: re is already imported at the top of the file
     
     # Clean up LLM response - remove markdown code blocks if present
     cleaned_text = llm_text.strip()

@@ -330,6 +330,18 @@ What measurement instrument would you like to find?""",
     except Exception:
         names = [line.strip(' -') for line in llm_text.split('\n') if line.strip()]
     
+    # Extract instrument name if LLM returned formatted strings (Name|Domain|Target|Items)
+    # Take only the part before the first pipe character
+    cleaned_names = []
+    for name in names:
+        # If it contains a pipe, extract just the name part (before first |)
+        if '|' in name:
+            cleaned_name = name.split('|')[0].strip()
+            cleaned_names.append(cleaned_name)
+        else:
+            cleaned_names.append(name.strip())
+    
+    names = cleaned_names
     logger.info(f"LLM returned {len(names)} instrument names: {names[:5]}{'...' if len(names) > 5 else ''}")
 
     matched = []

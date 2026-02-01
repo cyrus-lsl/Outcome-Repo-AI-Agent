@@ -31,9 +31,8 @@ def load_environment():
         env_path = find_dotenv(usecwd=True)
         if env_path:
             load_dotenv(env_path, override=False)
-            logger.info(f"Loaded environment from {env_path}")
     except ImportError:
-        logger.warning("python-dotenv not available, using system environment variables")
+        pass
 
 
 def resolve_excel_path(excel_path: str) -> str:
@@ -65,7 +64,6 @@ def initialize_agent():
         
         from backend.agent_core import MeasurementInstrumentAgent
         agent = MeasurementInstrumentAgent(excel_path, sheet_name=sheet_name)
-        logger.info("Agent initialized successfully")
         return agent
     except Exception as e:
         logger.error(f"Failed to initialize agent: {e}", exc_info=True)
@@ -77,7 +75,6 @@ def load_dataframe(excel_path: str, sheet_name: str):
     """Load and cache the Excel dataframe"""
     try:
         df = pd.read_excel(excel_path, sheet_name=sheet_name)
-        logger.info(f"Loaded {len(df)} instruments from {excel_path}")
         return df
     except Exception as e:
         logger.error(f"Failed to load dataframe: {e}", exc_info=True)
@@ -148,25 +145,18 @@ def get_llm_config_with_fallback():
     try:
         response = requests.get("http://localhost:11434/api/tags", timeout=5)
         if response.status_code == 200:
-            logger.info("✓ Using local Ollama (llama3.2:3b)")
             return ollama_base, ollama_model, "dummy-token"
-    except requests.exceptions.Timeout:
-        logger.warning("Ollama check timed out (5s), may not be running")
-    except requests.exceptions.ConnectionError:
-        logger.warning("Ollama not reachable at localhost:11434")
-    except Exception as e:
-        logger.warning(f"Ollama check failed: {type(e).__name__}")
+    except Exception:
+        pass
     
     # Fall back to configured LLM
     if fallback_base != ollama_base or fallback_model != ollama_model:
-        logger.info(f"⚠ Ollama not available, using configured LLM: {fallback_model}")
         return fallback_base, fallback_model, fallback_token
     else:
-        logger.error("❌ Ollama not available and no fallback LLM configured. Please start Ollama or configure LLM_BASE_URL/LLM_MODEL.")
-        return ollama_base, ollama_model, "dummy-token"  # Will fail but provide clear error
+        return ollama_base, ollama_model, "dummy-token"
 
 
-def call_llm_chat(prompt, df, validated_only=False, prog_only=False, max_results=6, agent=None):
+def call_llm_chat(prompt, df, validated_only=False, prog_only=False, max_results=6):
     """Call the configured LLM for responses.
 
     Uses LLM to search and match instruments from the database.
@@ -226,7 +216,6 @@ What measurement instrument would you like to find?""",
 
     # Parse item count constraints
     max_items = min_items = None
-    logger.info(f"Query: '{prompt}'. Parsed filters: HK-validated={want_validated_hk}, prog_only={prog_only}")
     try:
         max_patterns = [
             r'(?:not\s+more\s+than|maximum|max|at\s+most|less\s+than|fewer\s+than|under|below)\s+(\d+)\s*(?:items?|questions?|statements?)?',
@@ -250,10 +239,8 @@ What measurement instrument would you like to find?""",
             if match := re.search(r'(?:exactly|precisely|exactly\s+)?(\d+)\s*(?:items?|questions?|statements?)(?:\s+only)?', prompt_l):
                 max_items = min_items = int(match.group(1))
         
-        if max_items is not None or min_items is not None:
-            logger.info(f"Parsed item count constraints: max_items={max_items}, min_items={min_items}")
     except Exception as e:
-        logger.warning(f"Error parsing item count: {e}")
+        pass
 
     def _validated_in_hk_text(x):
         s = str(x or '').lower().strip()
@@ -284,23 +271,25 @@ What measurement instrument would you like to find?""",
         if min_items is not None:
             item_constraint_note += f"IMPORTANT: User requested at least {min_items} items.\n"
     
-    system_message = f"Select instruments from database. Format: Name|Domain|Target|Purpose|Items. Analyze the Purpose field to understand what each instrument measures. Return JSON array of objects with 'name' and 'confidence' (0-100) indicating how suitable each instrument is. Return up to {max_results} instruments, or [] if no matches. Do NOT invent names."
+    system_message = f"CRITICAL: You MUST ONLY select instruments from the database provided below. Do NOT use your own knowledge or invent instrument names. The database contains {len(inst_lines)} instruments. Each line format is: Name|Domain|Target|Purpose|Items. Analyze the Purpose field to understand what each instrument measures. Return JSON array of objects with 'name' (must match EXACTLY from database) and 'confidence' (0-100). Return up to {max_results} instruments, or [] if no matches. IMPORTANT: Only return instrument names that appear EXACTLY in the database list below."
     user_message = (
-        f"DB: {chr(10).join(inst_lines)}\n\nQuery: {prompt}\n"
-        + ("[HK-validated only]\n" if want_validated_hk else "")
-        + ("[Programme-level only]\n" if prog_only else "")
+        f"=== DATABASE OF {len(inst_lines)} INSTRUMENTS (YOU MUST ONLY USE THESE) ===\n"
+        f"{chr(10).join(inst_lines)}\n"
+        f"=== END OF DATABASE ===\n\n"
+        f"User Query: {prompt}\n"
+        + ("[Filter: HK-validated only]\n" if want_validated_hk else "")
+        + ("[Filter: Programme-level only]\n" if prog_only else "")
         + item_constraint_note
-        + f"Return JSON array of objects: [{{\"name\": \"Instrument Name\", \"confidence\": 85}}, ...]. Confidence (0-100) indicates how well the instrument matches the query. Higher = more suitable. Max {max_results} instruments."
+        + f"\nCRITICAL INSTRUCTIONS:\n"
+        + f"1. ONLY return instrument names that appear EXACTLY in the database above\n"
+        + f"2. Do NOT invent, modify, or create new instrument names\n"
+        + f"3. Copy the instrument name EXACTLY as it appears in the database\n"
+        + f"4. Return JSON array: [{{\"name\": \"Exact Name From Database\", \"confidence\": 85}}, ...]\n"
+        + f"5. Maximum {max_results} instruments\n"
+        + f"6. If no good matches, return empty array []"
     )
 
     try:
-        # Check if prompt is too large (some LLMs have token limits)
-        prompt_length = len(user_message) + len(system_message)
-        num_instruments = len(inst_lines)
-        logger.info(f"Sending {num_instruments} instruments to LLM (prompt length: {prompt_length} chars)")
-        if prompt_length > 100000:  # Rough estimate: ~100k chars might be too large
-            logger.warning(f"Prompt is very large ({prompt_length} chars, {num_instruments} instruments), may cause issues")
-        
         completion = client.chat.completions.create(
             model=model_name, messages=[{"role": "system", "content": system_message}, {"role": "user", "content": user_message}],
             max_tokens=300, temperature=0.0  # Increased for confidence scores
@@ -375,9 +364,7 @@ What measurement instrument would you like to find?""",
                     if name:
                         names.append(name)
         
-        logger.debug(f"Successfully parsed JSON: {len(names)} items, {len(confidence_scores)} with confidence scores")
     except json.JSONDecodeError as e:
-        logger.warning(f"JSON parsing failed: {e}, trying fallback parsing. Text preview: {cleaned_text[:200]}")
         # Fallback: try to extract from lines, removing quotes and brackets
         names = []
         confidence_scores = {}  # No confidence scores in fallback parsing
@@ -418,13 +405,12 @@ What measurement instrument would you like to find?""",
     
     names = cleaned_names
     confidence_scores = cleaned_confidence
-    logger.info(f"LLM returned {len(names)} instrument names: {names[:5]}{'...' if len(names) > 5 else ''}")
-    if confidence_scores:
-        logger.info(f"Confidence scores: {dict(list(confidence_scores.items())[:3])}")
 
     matched = []
     unknown = []
     available_set = {n.lower() for n in instrument_names}
+    # Track already matched instrument names to avoid duplicates
+    matched_names = set()
     
     for nm in names:
         if nm.strip().lower() not in available_set:
@@ -437,6 +423,9 @@ What measurement instrument would you like to find?""",
         if not match.empty and len(matched) < max_results:
             r = match.iloc[0]
             inst_name = r.get('Measurement Instrument', '')
+            # Skip if this instrument is already in matched list
+            if inst_name.lower() in matched_names:
+                continue
             # Get confidence score if available
             confidence = confidence_scores.get(inst_name.lower(), None)
             matched.append({
@@ -456,14 +445,14 @@ What measurement instrument would you like to find?""",
                 'download_eng': r.get('Download (Eng)', ''),
                 'download_chi': r.get('Download (Chi)', ''),
                 'citation': r.get('Citation', ''),
-                'semantic_score': None,
                 'confidence_score': confidence  # Add confidence score from LLM (0-100)
             })
+            # Add to matched_names set to track duplicates
+            matched_names.add(inst_name.lower())
 
     if unknown:
-        logger.warning(f'LLM returned {len(unknown)} names not in database: {unknown[:3]}{"..." if len(unknown) > 3 else ""}')
+        pass
 
-    logger.info(f"Matched {len(matched)} instruments from LLM response")
     
     if not matched:
         if names:
@@ -471,12 +460,9 @@ What measurement instrument would you like to find?""",
         return {'text': 'No matching instruments found. Please try a more specific query.', 'matched': [], 'unknown': unknown}
 
     filtered = matched
-    logger.info(f"Starting with {len(filtered)} matched instruments")
     
     if want_validated_hk:
-        before_count = len(filtered)
         filtered = [ins for ins in filtered if _validated_in_hk_text(ins.get('validated', ''))]
-        logger.info(f"After HK validation filter: {len(filtered)}/{before_count} instruments remain")
         if not filtered:
             return {'text': 'No instruments validated in Hong Kong found matching the query.', 'matched': [], 'unknown': unknown}
 
@@ -489,15 +475,10 @@ What measurement instrument would you like to find?""",
             return None
         
         before_count = len(filtered)
-        item_counts = [parse_count(ins.get('no_of_items', '')) for ins in filtered]
-        logger.info(f"Item count filter: max={max_items}, min={min_items}. Instrument counts: {[c for c in item_counts[:5] if c is not None]}{'...' if len(item_counts) > 5 else ''}")
-        
         item_filtered = [ins for ins in filtered 
                         if (count := parse_count(ins.get('no_of_items', ''))) is not None
                         and (max_items is None or count <= max_items)
                         and (min_items is None or count >= min_items)]
-        
-        logger.info(f"After item count filter: {len(item_filtered)}/{before_count} instruments remain")
         
         if item_filtered:
             filtered = item_filtered
@@ -514,7 +495,6 @@ What measurement instrument would you like to find?""",
     has_confidence = any(ins.get('confidence_score') is not None for ins in filtered)
     if has_confidence:
         filtered.sort(key=lambda x: x.get('confidence_score') or 0, reverse=True)
-        logger.info(f"Sorted {len(filtered)} results by confidence score")
 
     out_parts = []
     for ins in filtered:
@@ -795,7 +775,6 @@ def render_chat_page(agent, df):
                     validated_only=False,
                     prog_only=False,
                     max_results=8,
-                    agent=agent,
                 )
 
             # Display response

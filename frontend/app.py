@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import sys
+import json
 import pathlib
 import re
 import logging
@@ -314,44 +315,32 @@ What measurement instrument would you like to find?""",
         else:
             return {'text': f"I encountered an error ({error_type}): {error_msg[:200]}. Please try again or check the logs for details.", 'matched': [], 'unknown': []}
 
-    import json
-    # Note: re is already imported at the top of the file
-    
-    # Clean up LLM response - remove markdown code blocks if present
     cleaned_text = llm_text.strip()
     
-    # Remove markdown code blocks (```json ... ``` or ``` ... ```)
-    # Find content between first ``` and last ```
     if '```' in cleaned_text:
         first_backticks = cleaned_text.find('```')
         if first_backticks >= 0:
-            # Find the newline after the opening ```
             after_open = cleaned_text.find('\n', first_backticks)
             if after_open > 0:
                 cleaned_text = cleaned_text[after_open+1:]
             else:
-                # No newline, just remove the ``` part
                 cleaned_text = cleaned_text[first_backticks+3:]
         
-        # Find and remove closing ```
         last_backticks = cleaned_text.rfind('```')
         if last_backticks > 0:
             cleaned_text = cleaned_text[:last_backticks]
     
     cleaned_text = cleaned_text.strip()
     
-    # Initialize confidence_scores dictionary
     confidence_scores = {}
     
     try:
         parsed = json.loads(cleaned_text)
-        # Handle both formats: array of strings or array of objects with name/confidence
         names = []
         
         if isinstance(parsed, list):
             for item in parsed:
                 if isinstance(item, dict):
-                    # New format: {"name": "...", "confidence": 85}
                     name = str(item.get('name', '')).strip()
                     confidence = item.get('confidence', None)
                     if name:
@@ -359,21 +348,17 @@ What measurement instrument would you like to find?""",
                         if confidence is not None:
                             confidence_scores[name.lower()] = float(confidence)
                 elif isinstance(item, str):
-                    # Old format: just string names
                     name = item.strip()
                     if name:
                         names.append(name)
         
     except json.JSONDecodeError as e:
-        # Fallback: try to extract from lines, removing quotes and brackets
         names = []
-        confidence_scores = {}  # No confidence scores in fallback parsing
+        confidence_scores = {}
         for line in cleaned_text.split('\n'):
             line = line.strip()
-            # Skip empty lines, brackets, commas, markdown markers
             if not line or line in ['[', ']', ',', '```json', '```']:
                 continue
-            # Remove JSON array brackets and quotes from start/end
             line = re.sub(r'^[\[\],"\']+', '', line)
             line = re.sub(r'[\[\],"\']+$', '', line)
             line = line.strip().strip('"\'')
@@ -382,24 +367,19 @@ What measurement instrument would you like to find?""",
     except Exception as e:
         logger.error(f"Unexpected error parsing LLM response: {e}")
         names = []
-        confidence_scores = {}  # Initialize if not already set
+        confidence_scores = {} 
     
-    # Extract instrument name if LLM returned formatted strings (Name|Domain|Target|Purpose|Items)
-    # Take only the part before the first pipe character
     cleaned_names = []
     cleaned_confidence = {}
     for name in names:
-        # If it contains a pipe, extract just the name part (before first |)
         if '|' in name:
             cleaned_name = name.split('|')[0].strip()
             cleaned_names.append(cleaned_name)
-            # Preserve confidence score if available
             if cleaned_name.lower() in confidence_scores:
                 cleaned_confidence[cleaned_name.lower()] = confidence_scores[cleaned_name.lower()]
         else:
             cleaned_name = name.strip()
             cleaned_names.append(cleaned_name)
-            # Preserve confidence score if available
             if cleaned_name.lower() in confidence_scores:
                 cleaned_confidence[cleaned_name.lower()] = confidence_scores[cleaned_name.lower()]
     
@@ -409,7 +389,6 @@ What measurement instrument would you like to find?""",
     matched = []
     unknown = []
     available_set = {n.lower() for n in instrument_names}
-    # Track already matched instrument names to avoid duplicates
     matched_names = set()
     
     for nm in names:
@@ -423,10 +402,8 @@ What measurement instrument would you like to find?""",
         if not match.empty and len(matched) < max_results:
             r = match.iloc[0]
             inst_name = r.get('Measurement Instrument', '')
-            # Skip if this instrument is already in matched list
             if inst_name.lower() in matched_names:
                 continue
-            # Get confidence score if available
             confidence = confidence_scores.get(inst_name.lower(), None)
             matched.append({
                 'name': inst_name,
@@ -445,9 +422,8 @@ What measurement instrument would you like to find?""",
                 'download_eng': r.get('Download (Eng)', ''),
                 'download_chi': r.get('Download (Chi)', ''),
                 'citation': r.get('Citation', ''),
-                'confidence_score': confidence  # Add confidence score from LLM (0-100)
+                'confidence_score': confidence
             })
-            # Add to matched_names set to track duplicates
             matched_names.add(inst_name.lower())
 
     if unknown:
@@ -491,7 +467,6 @@ What measurement instrument would you like to find?""",
             return {'text': f'Found {before_count} matching instrument(s), but none have {" and ".join(constraints)}. Please try adjusting your search criteria or removing the item count constraint.', 
                    'matched': [], 'unknown': unknown}
 
-    # Sort by confidence score (highest first) if available
     has_confidence = any(ins.get('confidence_score') is not None for ins in filtered)
     if has_confidence:
         filtered.sort(key=lambda x: x.get('confidence_score') or 0, reverse=True)
@@ -499,10 +474,8 @@ What measurement instrument would you like to find?""",
     out_parts = []
     for ins in filtered:
         part = f"**{ins['name']}" + (f" ({ins['acronym']})" if ins['acronym'] else '') + f"** — {ins['domain']}\n\n"
-        # Add confidence score if available
         if ins.get('confidence_score') is not None:
             confidence = ins['confidence_score']
-            # Color code: 80+ = excellent, 60-79 = good, 40-59 = fair, <40 = low
             if confidence >= 80:
                 confidence_label = "🟢 Excellent match"
             elif confidence >= 60:
@@ -536,26 +509,20 @@ def _display_response(response, matched):
         matched = response.get('matched', [])
         if not matched:
             text = response.get('text', '')
-            # Only show message if text is not empty
             if text:
                 st.info(text)
         else:
-            # Don't show "Found X instruments" text
             pass
             
-            # Display instruments with improved layout
             for idx, ins in enumerate(matched, 1):
-                # Build expander title with badges
                 title_parts = [f"{idx}. {ins.get('name', 'Unknown')}"]
                 if ins.get('acronym'):
                     title_parts.append(f"({ins.get('acronym')})")
                 
                 with st.expander(" ".join(title_parts), expanded=(idx == 1)):
-                    # Domain badge
                     if ins.get('domain'):
                         st.markdown(f'<span class="badge badge-domain">📁 {ins.get("domain")}</span>', unsafe_allow_html=True)
                     
-                    # Validation and programme badges
                     badge_html = ""
                     validated_val = ins.get('validated', '')
                     if validated_val:
@@ -570,10 +537,8 @@ def _display_response(response, matched):
                     if badge_html:
                         st.markdown(badge_html, unsafe_allow_html=True)
                     
-                    # Confidence score
                     if ins.get('confidence_score') is not None:
                         confidence = ins['confidence_score']
-                        # Color code: 80+ = excellent, 60-79 = good, 40-59 = fair, <40 = low
                         if confidence >= 80:
                             confidence_label = "🟢 Excellent match"
                             confidence_color = "#22c55e"  # Green
@@ -596,15 +561,12 @@ def _display_response(response, matched):
                     
                     st.markdown("---")
                     
-                    # Purpose
                     if ins.get('purpose'):
                         st.markdown(f"**📝 Purpose:**  \n{ins.get('purpose')}")
                     
-                    # Target group
                     if ins.get('target'):
                         st.markdown(f"**👥 Target Group:** {ins.get('target')}")
                     
-                    # Details in columns
                     col1, col2 = st.columns(2)
                     with col1:
                         if ins.get('no_of_items'):
@@ -615,7 +577,6 @@ def _display_response(response, matched):
                         if ins.get('scoring'):
                             st.markdown(f"**Scoring:** {ins.get('scoring')}")
                     
-                    # Sample questions
                     sample_questions = []
                     for q_key in ['sample_q1', 'sample_q2', 'sample_q3']:
                         if ins.get(q_key):
@@ -626,7 +587,6 @@ def _display_response(response, matched):
                             for q in sample_questions:
                                 st.markdown(f"• {q}")
                     
-                    # Downloads and citation
                     download_links = []
                     if ins.get('download_eng'):
                         download_links.append(f"[📥 Download (English)]({ins.get('download_eng')})")
@@ -646,7 +606,6 @@ def _display_response(response, matched):
 def render_chat_page(agent, df):
     """Render the chat interface with conversation history"""
     
-    # Add custom CSS for better styling
     st.markdown("""
         <style>
         .main-header {
@@ -726,7 +685,6 @@ def render_chat_page(agent, df):
     
     st.subheader("💬 Chat with AI Assistant")
     
-    # Help section with example questions
     st.markdown("""
     Hello! I can help you find measurement instruments. Please describe what you're looking for, for example:
     
@@ -737,36 +695,28 @@ def render_chat_page(agent, df):
     What would you like to search for?
     """)
     
-    # Initialize chat messages history - clear on app restart
     if 'chat_initialized' not in st.session_state:
         st.session_state.chat_messages = []
         st.session_state.chat_initialized = True
-    # Ensure it exists
     if 'chat_messages' not in st.session_state:
         st.session_state.chat_messages = []
 
-    # Display chat history
     for message in st.session_state.chat_messages:
         with st.chat_message(message["role"]):
             if message["role"] == "user":
                 st.markdown(message["content"])
             else:
-                # Display assistant response (can be text or instrument results)
                 if isinstance(message["content"], dict):
                     _display_response(message["content"], message.get("matched", []))
                 else:
                     st.markdown(message["content"])
 
-    # Chat input - stays at bottom (native Streamlit behavior)
     if prompt := st.chat_input("Ask about measurement instruments..."):
-        # Add user message to history
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
         
-        # Display user message immediately
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Get AI response (no filters)
         with st.chat_message("assistant"):
             with st.spinner("🤔 Searching..."):
                 response = call_llm_chat(
@@ -777,10 +727,8 @@ def render_chat_page(agent, df):
                     max_results=8,
                 )
 
-            # Display response
             _display_response(response, response.get('matched', []) if isinstance(response, dict) else [])
             
-            # Save response to history
             st.session_state.chat_messages.append({
                 "role": "assistant", 
                 "content": response,
@@ -792,7 +740,6 @@ def render_data_management_page(df, excel_path):
     """Render the data management page"""
     st.title("📂 Data Management")
     
-    # Database Overview - Top section with cards
     st.markdown("### 📊 Current Database")
     overview_col1, overview_col2 = st.columns(2)
     with overview_col1:
@@ -804,14 +751,12 @@ def render_data_management_page(df, excel_path):
         else:
             st.metric("Domains", "N/A")
     
-    # Current data source in a container
     with st.container():
         st.markdown("**Current Data Source:**")
         st.code(excel_path, language=None)
     
     st.divider()
     
-    # Upload Section - Clean card-like layout
     st.markdown("### 📤 Upload New Dataset")
     
     with st.container():
@@ -835,7 +780,6 @@ def render_data_management_page(df, excel_path):
     
     st.divider()
     
-    # Refresh Section - Simple and clear
     st.markdown("### 🔄 Refresh Data")
     st.caption("If you've updated the Excel file externally, click below to reload the data.")
     
@@ -853,7 +797,6 @@ def render_manual_search_page(agent, df):
     st.subheader("🧭 Manual Search")
     st.markdown("Use filters to narrow down your search for measurement instruments.")
     
-    # All filters shown directly
     beneficiaries_input = st.text_input(
         "👥 Target beneficiaries",
         placeholder="e.g. youth, elderly, teachers (leave empty to search all)",
@@ -867,7 +810,6 @@ def render_manual_search_page(agent, df):
         help="Describe what you want to measure"
     )
 
-    # Additional filters
     st.markdown("**Additional Filters:**")
     mcol1, mcol2 = st.columns([1, 1])
     with mcol1:
@@ -875,7 +817,6 @@ def render_manual_search_page(agent, df):
     with mcol2:
         manual_prog_only = st.checkbox("📊 Programme-level only", value=False, help="Show only programme-level metrics")
 
-    # Search button
     if st.button("🔍 Search", type="primary", use_container_width=True):
         try:
             validated_param = 'yes' if manual_validated_only else 'both'
@@ -902,7 +843,6 @@ def render_manual_search_page(agent, df):
                         title += f" ({ins.get('acronym')})"
                     
                     with st.expander(title, expanded=(idx == 1)):
-                        # Badges
                         badge_html = ""
                         if ins.get('domain'):
                             badge_html += f'<span class="badge badge-domain">📁 {ins.get("domain")}</span>'
@@ -913,7 +853,6 @@ def render_manual_search_page(agent, df):
                         
                         st.markdown("---")
                         
-                        # Information
                         if ins.get('purpose'):
                             st.markdown(f"**📝 Purpose:**  \n{ins.get('purpose')}")
                         if ins.get('target_group'):
@@ -936,7 +875,6 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Enhanced header with better styling
     st.markdown("""
         <style>
         .main-title {
@@ -965,13 +903,10 @@ def main():
     
     load_environment()
     
-    # Resolve Excel file path before validation
     if Config:
-        # Update Config with resolved path for validation
         original_path = Config.EXCEL_FILE_PATH
         Config.EXCEL_FILE_PATH = resolve_excel_path(Config.EXCEL_FILE_PATH)
     
-    # Validate configuration
     if Config:
         is_valid, errors = Config.validate()
         if not is_valid:
@@ -988,7 +923,6 @@ def main():
         logger.error("Agent initialization failed")
         return
     
-    # Resolve Excel path early
     if Config:
         excel_path = Config.EXCEL_FILE_PATH
         sheet_name = Config.EXCEL_SHEET_NAME
@@ -997,7 +931,6 @@ def main():
         sheet_name = "Measurement Instruments"
     excel_path = resolve_excel_path(excel_path)
     
-    # Load data first
     try:
         df = load_dataframe(excel_path, sheet_name)
     except FileNotFoundError:
@@ -1009,7 +942,6 @@ def main():
         logger.error(f"Error loading dataframe: {e}", exc_info=True)
         return
 
-    # Sidebar: Navigation
     st.sidebar.markdown("### 🧭 Navigation")
     page = st.sidebar.radio(
         "Choose a page",
@@ -1018,7 +950,6 @@ def main():
         label_visibility="collapsed"
     )
     
-    # Route to appropriate page
     if page == "💬 Chat":
         render_chat_page(agent, df)
     elif page == "🔍 Manual Search":

@@ -1,6 +1,6 @@
 """Shared helpers for instrument search."""
 import re
-
+from rank_bm25 import BM25Okapi
 import pandas as pd
 
 COMBINE_COLS = (
@@ -30,24 +30,25 @@ def keyword_prefilter(df: pd.DataFrame, query: str, top_n: int = 25) -> pd.DataF
 
 
 def keyword_search_scored(df: pd.DataFrame, query: str, top_n: int = 10) -> list:
-    """Return [{instrument: Series, score: int}, ...] sorted by relevance."""
-    df = ensure_combined_text(df)
-    tokens = [t.lower() for t in str(query).split() if len(t) > 2]
-    if not tokens:
+    """Return [{'instrument': Series, 'score': float}, ...] sorted by relevance."""
+    df = ensure_combined_text(df).reset_index(drop=True)
+
+    texts = df["combined_text"].fillna("").astype(str).str.lower().tolist()
+    corpus = [text.split() for text in texts]
+
+    query_tokens = [t for t in str(query).lower().split() if len(t) > 2]
+    if not query_tokens:
         return []
 
-    scores = []
-    reset = df.reset_index(drop=True)
-    for i, row in reset.iterrows():
-        text = str(row.get('combined_text', '')).lower()
-        score = sum(1 for t in tokens if t in text)
-        if score > 0:
-            scores.append((score, i))
+    bm25 = BM25Okapi(corpus)
+    scores = bm25.get_scores(query_tokens)
 
-    scores.sort(reverse=True)
+    top_idx = scores.argsort()[::-1][:top_n]
+
     return [
-        {'instrument': reset.iloc[idx], 'score': score}
-        for score, idx in scores[:top_n]
+        {"instrument": df.iloc[i], "score": float(scores[i])}
+        for i in top_idx
+        if scores[i] > 0
     ]
 
 

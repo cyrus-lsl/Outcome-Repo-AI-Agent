@@ -2,6 +2,7 @@ import logging
 import os
 import pathlib
 import sys
+import uuid
 
 import pandas as pd
 import streamlit as st
@@ -10,32 +11,47 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.llm import search_by_chat
+from backend.orchestrator import get_orchestrator
+from backend.services.data_loader import clear_caches, load_instruments
 from config import Config, logger
 
 
 def load_environment():
     try:
         from dotenv import load_dotenv, find_dotenv
-        env_path = find_dotenv(usecwd=True)
-        if env_path:
+
+        candidates = []
+        root_dir = ROOT
+        repo_env = root_dir / '.env'
+        if repo_env.is_file():
+            candidates.append(repo_env)
+        nested_env = repo_env / '.env'
+        if nested_env.is_file():
+            candidates.append(nested_env)
+
+        for env_path in candidates:
             load_dotenv(env_path, override=False)
+
+        if not candidates:
+            env_path = find_dotenv(usecwd=True)
+            if env_path:
+                load_dotenv(env_path, override=False)
     except ImportError:
         pass
 
 
-def resolve_excel_path(excel_path: str) -> str:
-    if isinstance(excel_path, str) and excel_path.lower().startswith(('http://', 'https://')):
-        return excel_path
-    if os.path.isabs(excel_path):
-        return excel_path
-    return str((ROOT / excel_path).resolve())
+def resolve_path(path: str) -> str:
+    if isinstance(path, str) and path.lower().startswith(('http://', 'https://')):
+        return path
+    if os.path.isabs(path):
+        return path
+    return str((ROOT / path).resolve())
 
 
 @st.cache_resource
 def initialize_agent():
     try:
-        excel_path = resolve_excel_path(Config.EXCEL_FILE_PATH)
+        excel_path = resolve_path(Config.EXCEL_FILE_PATH)
         from backend.agent_core import MeasurementInstrumentAgent
         return MeasurementInstrumentAgent(excel_path, sheet_name=Config.EXCEL_SHEET_NAME)
     except Exception as e:
@@ -58,11 +74,21 @@ def save_uploaded_excel(uploaded_file, dest_path: str):
         return False, str(e)
 
 
-def _display_response(response):
-    if not isinstance(response, dict) or 'matched' not in response:
-        st.markdown(response if isinstance(response, str) else str(response))
-        return
+INTENT_LABELS = {
+    'find_instrument': '🔍 Find Instrument',
+    'instrument_details': '📋 Project Usage',
+    'compare': '⚖️ Compare',
+    'why': '💡 Explanation',
+    'handbook': '📖 Handbook',
+}
 
+
+def _ensure_session_id():
+    if 'session_id' not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+
+
+def _display_instrument_cards(response):
     matched = response.get('matched', [])
     if not matched:
         if text := response.get('text', ''):
@@ -77,7 +103,7 @@ def _display_response(response):
         if filters.get('programme_level'):
             tags.append('Programme-level only')
         st.caption('🔎 Active filters: ' + ', '.join(tags))
-    
+
     for idx, ins in enumerate(matched, 1):
         title = f"{idx}. {ins.get('name', 'Unknown')}"
         if ins.get('acronym'):
@@ -146,6 +172,63 @@ def _display_response(response):
                     st.markdown(ins['citation'])
 
 
+def _display_response(response):
+    if not isinstance(response, dict):
+        st.markdown(response if isinstance(response, str) else str(response))
+        return
+
+    intent = response.get('intent', 'find_instrument')
+    label = INTENT_LABELS.get(intent, intent)
+    tool_summary = response.get('tool_summary') or {}
+    tool_name = tool_summary.get('called') or 'unknown_tool'
+    route_label = f"Route: {label} • Tool: {tool_name}"
+    st.caption(route_label)
+
+    if response.get('status') and response.get('status') != 'ok':
+        st.warning(f"Status: {response['status']}")
+
+    if 'text' in response:
+        st.markdown(response['text'])
+
+    if response.get('plan') or response.get('tool_calls'):
+        with st.expander('🔎 Evidence and tool trace', expanded=False):
+            if response.get('plan'):
+                st.json(response['plan'])
+            if response.get('tool_calls'):
+                st.json(response['tool_calls'])
+
+    if intent in ('find_instrument', 'compare'):
+        if response.get('matched'):
+            st.divider()
+            if intent == 'compare':
+                st.markdown('**Compared instruments:**')
+            else:
+                st.markdown('**Top matches:**')
+            _display_instrument_cards({'matched': response.get('matched', []), 'filters': {}})
+    elif intent == 'instrument_details':
+        if response.get('details'):
+            st.divider()
+            st.markdown('**Project usage evidence:**')
+            _display_usage_evidence(response['details'])
+
+
+def _display_usage_evidence(records):
+    grouped = {}
+    for record in records:
+        domain = str(record.get('Outcome Domain') or 'Outcome domain not specified').strip()
+        domain_key = ''.join(domain.lower().split()).replace('-', '')
+        actual_use = str(record.get('Actual Use in Project') or 'Use not specified').strip()
+        grouped.setdefault(domain_key, {'label': domain, 'uses': set()})['uses'].add(actual_use)
+
+    for group in grouped.values():
+        st.markdown(f"**Outcome domain: {group['label']}**")
+        for actual_use in sorted(group['uses']):
+            st.markdown(f'- {actual_use}')
+
+    with st.expander(f'Show {len(records)} source records'):
+        st.json(records)
+
+
 CHAT_CSS = """
 <style>
 .badge { display:inline-block; padding:0.2rem 0.6rem; border-radius:12px;
@@ -159,13 +242,15 @@ CHAT_CSS = """
 """
 
 
-def render_chat_page(df):
+def render_chat_page():
     st.markdown(CHAT_CSS, unsafe_allow_html=True)
     st.subheader('💬 Chat with AI Assistant')
     st.markdown(
-        "Describe what you're looking for, e.g. "
-        "'mental health assessment for elderly' or 'quality of life scale'."
+        "Ask about instruments, project usage, comparisons, or follow up with *why* questions. "
+        "The assistant uses structured tool calls to ground its answer in the dataset."
     )
+
+    _ensure_session_id()
 
     if 'chat_messages' not in st.session_state:
         st.session_state.chat_messages = []
@@ -183,8 +268,9 @@ def render_chat_page(df):
             st.markdown(prompt)
 
         with st.chat_message('assistant'):
-            with st.spinner('🤔 Searching...'):
-                response = search_by_chat(prompt, df, Config, max_results=Config.MAX_RESULTS)
+            with st.spinner('🤔 Thinking...'):
+                orchestrator = get_orchestrator()
+                response = orchestrator.handle_message(st.session_state.session_id, prompt)
             _display_response(response)
             st.session_state.chat_messages.append({'role': 'assistant', 'content': response})
 
@@ -230,12 +316,18 @@ def render_manual_search_page(agent):
 
 def render_data_management_page(df, excel_path):
     st.title('📂 Data Management')
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.metric('Total Instruments', len(df))
     with c2:
         domains = df['Outcome Domain'].dropna().unique() if 'Outcome Domain' in df.columns else []
         st.metric('Domains', len(domains))
+    with c3:
+        try:
+            usage = load_instruments()
+            st.metric('Cached', 'Ready')
+        except Exception:
+            st.metric('Cached', 'Error')
 
     st.code(excel_path, language=None)
     st.divider()
@@ -245,6 +337,7 @@ def render_data_management_page(df, excel_path):
         ok, err = save_uploaded_excel(uploaded, excel_path)
         if ok:
             load_dataframe.clear()
+            clear_caches()
             st.success('✅ File saved. Reloading...')
             st.rerun()
         else:
@@ -252,6 +345,7 @@ def render_data_management_page(df, excel_path):
 
     if st.button('🔄 Refresh Data Now', type='primary', use_container_width=True):
         load_dataframe.clear()
+        clear_caches()
         st.rerun()
 
 
@@ -259,12 +353,14 @@ def main():
     st.set_page_config(page_title='Measurement Instrument Assistant', page_icon='📊', layout='wide')
     st.markdown(
         '<h1 class="main-title">📊 Measurement Instrument Assistant</h1>'
-        '<p class="subtitle">AI-powered search for research measurement instruments</p>',
+        '<p class="subtitle">Multi-branch AI agent for research measurement instruments</p>',
         unsafe_allow_html=True,
     )
 
     load_environment()
-    Config.EXCEL_FILE_PATH = resolve_excel_path(Config.EXCEL_FILE_PATH)
+    Config.EXCEL_FILE_PATH = resolve_path(Config.EXCEL_FILE_PATH)
+    Config.PROJECT_USAGE_PATH = resolve_path(Config.PROJECT_USAGE_PATH)
+    Config.HANDBOOK_PATH = resolve_path(Config.HANDBOOK_PATH)
 
     is_valid, errors = Config.validate()
     if not is_valid:
@@ -294,7 +390,7 @@ def main():
         label_visibility='collapsed',
     )
     if page == '💬 Chat':
-        render_chat_page(df)
+        render_chat_page()
     elif page == '🔍 Manual Search':
         render_manual_search_page(agent)
     else:

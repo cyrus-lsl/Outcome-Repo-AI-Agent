@@ -4,3 +4,5 @@ python-dotenv
 openai
 openpyxl
 rank_bm25
+langchain-core>=0.3
+langgraph>=0.2
